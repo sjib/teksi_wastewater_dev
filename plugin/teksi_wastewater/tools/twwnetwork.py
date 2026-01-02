@@ -37,7 +37,6 @@ import networkx as nx
 from qgis.core import NULL, Qgis, QgsGeometry, QgsMessageLog, QgsPointXY
 from qgis.PyQt.QtCore import QObject, Qt, pyqtSignal
 
-from ..utils.database_utils import DatabaseUtils
 from ..utils.qt_utils import OverrideCursor
 
 
@@ -160,38 +159,39 @@ class TwwGraphManager(QObject):
         Refreshes the network graph. It will force a refresh of the materialized views in the database and then reload
         and recreate the graph.
         """
-        try:
-            with OverrideCursor(Qt.WaitCursor):
-                DatabaseUtils.refresh_matviews()
-            self.message_emitted.emit(
-                self.tr("Success"),
-                self.tr("Materialized Views successfully updated"),
-                Qgis.Success,
-            )
+        with OverrideCursor(Qt.WaitCursor):
+            transaction = self.nodeLayer.dataProvider().transaction()
+            temporary_edit_session = False
+            if not transaction:
+                self.nodeLayer.startEditing()
+                temporary_edit_session = True
+                transaction = self.nodeLayer.dataProvider().transaction()
 
-        except Exception as exception:
-            self.message_emitted.emit(
-                self.tr("Error"),
-                self.tr(f"Materialized Views update failed:\n\n{exception}"),
-                Qgis.Critical,
-            )
+                if not transaction:
+                    self.message_emitted.emit(
+                        self.tr("Error"),
+                        self.tr("Could not initialize transaction"),
+                        Qgis.Critical,
+                    )
+                    return
 
-        try:
+            query_template = "SELECT tww_app.network_refresh_network_simple();"
+            res, error = transaction.executeSql(query_template)
+            if not res:
+                self.message_emitted.emit(self.tr("Error"), error, Qgis.Critical)
+            else:
+                self.message_emitted.emit(
+                    self.tr("Success"),
+                    self.tr("Network successfully updated"),
+                    Qgis.Success,
+                )
+
+            if temporary_edit_session:
+                self.nodeLayer.commitChanges()
+
             # recreate networkx graph
             self.graph.clear()
             self.createGraph()
-            self.message_emitted.emit(
-                self.tr("Success"),
-                self.tr("Network successfully updated"),
-                Qgis.Success,
-            )
-
-        except Exception as exception:
-            self.message_emitted.emit(
-                self.tr("Error"),
-                self.tr(f"Network update failed:\n\n{exception}"),
-                Qgis.Critical,
-            )
 
     def _profile(self, name):
         """
@@ -403,8 +403,11 @@ class TwwFeatureCache:
         Get an attribute as float
         """
         try:
-            return float(self.attr(feat, attr))
-        except TypeError:
+            value = self.attr(feat, attr)
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
             return None
 
     def attrAsUnicode(self, feat, attr):
@@ -424,17 +427,51 @@ class TwwFeatureCache:
             else:
                 return feat[attr]
         except KeyError:
-            QgsMessageLog.logMessage(f"Unknown field {attr}", "tww", Qgis.Critical)
+            # Log as debug instead of critical - missing fields may be optional
+            QgsMessageLog.logMessage(f"Unknown field {attr} (may be optional)", "tww", Qgis.Warning)
             return None
 
     def attrAsGeometry(self, feat, attr):
         """
         Get an attribute as geometry
+        Handles QgsGeometry, QgsReferencedGeometry, and string (EWKT) formats
         """
-        ewktstring = self.attrAsUnicode(feat, attr)
-        # Strip SRID=21781; token, TODO: Fix this upstream
-        m = re.search("(.*;)?(.*)", ewktstring)
-        return QgsGeometry.fromWkt(m.group(2))
+        geom_value = self.attr(feat, attr)
+        
+        # Handle None values
+        if geom_value is None:
+            return QgsGeometry()
+        
+        # Handle QgsReferencedGeometry or QgsGeometry objects directly
+        if isinstance(geom_value, QgsGeometry):
+            return geom_value
+        elif hasattr(geom_value, 'geometry'):  # QgsReferencedGeometry has a geometry() method
+            try:
+                return geom_value.geometry()
+            except Exception:
+                # If geometry() method fails, try to get geometry from feature directly
+                if hasattr(feat, 'geometry') and feat.geometry():
+                    return feat.geometry()
+                return QgsGeometry()
+        
+        # Handle string/EWKT format (legacy support)
+        if isinstance(geom_value, str):
+            ewktstring = geom_value
+            # Strip SRID=21781; token, TODO: Fix this upstream
+            m = re.search("(.*;)?(.*)", ewktstring)
+            if m:
+                try:
+                    return QgsGeometry.fromWkt(m.group(2))
+                except Exception:
+                    return QgsGeometry()
+            else:
+                try:
+                    return QgsGeometry.fromWkt(ewktstring)
+                except Exception:
+                    return QgsGeometry()
+        
+        # If unknown type, return empty geometry
+        return QgsGeometry()
 
     def asDict(self) -> dict:
         """

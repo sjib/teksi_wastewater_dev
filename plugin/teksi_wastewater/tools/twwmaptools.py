@@ -162,6 +162,9 @@ class TwwMapTool(QgsMapTool):
         """
         if not self.snapper:
             self.node_layer = self.network_analyzer.getNodeLayer()
+            if not self.node_layer:
+                self.logger.warning("Node layer is None, cannot initialize snapper")
+                return
             self.snapper = QgsMapCanvasSnappingUtils(self.canvas)
             config = QgsSnappingConfig()
             config.setMode(QgsSnappingConfig.AdvancedConfiguration)
@@ -171,6 +174,7 @@ class TwwMapTool(QgsMapTool):
             )
             config.setIndividualLayerSettings(self.node_layer, ils)
             self.snapper.setConfig(config)
+            self.logger.debug(f"Snapper initialized for layer: {self.node_layer.name()}")
 
     def snap_point(self, event, show_menu: bool = True) -> QgsPointLocator.Match:
         """
@@ -182,9 +186,17 @@ class TwwMapTool(QgsMapTool):
 
         if not self.snapper:
             self.init_snapper()
+        
+        if not self.snapper:
+            self.logger.warning("Snapper is not initialized, cannot snap")
+            return QgsPointLocator.Match()
 
         match_filter = CounterMatchFilter()
-        match = self.snapper.snapToMap(clicked_point, match_filter)
+        try:
+            match = self.snapper.snapToMap(clicked_point, match_filter)
+        except Exception as e:
+            self.logger.error(f"Error during snapping: {e}")
+            return QgsPointLocator.Match()
 
         if not match.isValid() or len(match_filter.matches) == 1:
             return match
@@ -257,6 +269,7 @@ class TwwProfileMapTool(TwwMapTool):
 
     selectedPathPoints = []
     pathPolyline = []
+    isConfirmed = False
 
     def __init__(self, canvas, button, network_analyzer):
         TwwMapTool.__init__(self, canvas, button, network_analyzer)
@@ -295,6 +308,7 @@ class TwwProfileMapTool(TwwMapTool):
         self.rbHelperLine.reset()
         self.selectedPathPoints = []
         self.pathPolyline = []
+        self.isConfirmed = False
 
     def findPath(self, start_point, end_point):
         """
@@ -434,26 +448,70 @@ class TwwProfileMapTool(TwwMapTool):
 
         @param event: The mouse event with coordinates and all
         """
-        if self.selectedPathPoints:
+        # Only show helper line if selection is not confirmed yet
+        if self.selectedPathPoints and not self.isConfirmed:
             self.rbHelperLine.reset()
             for point in self.selectedPathPoints:
                 self.rbHelperLine.addPoint(point[1])
-            mouse_pos = self.canvas.getCoordinateTransform().toMapCoordinates(
-                event.pos().x(), event.pos().y()
-            )
+            # Use event.mapPoint() for QGIS 3.x compatibility
+            try:
+                mouse_pos = event.mapPoint()
+            except AttributeError:
+                # Fallback for older QGIS versions
+                mouse_pos = self.canvas.getCoordinateTransform().toMapCoordinates(
+                    event.pos().x(), event.pos().y()
+                )
             self.rbHelperLine.addPoint(mouse_pos)
 
     def rightClicked(self, _):
         """
-        Cancel any ongoing path selection
-
+        Confirm the current selection (finish current path)
+        Right-click to confirm and finalize the current profile path
+        
         @param event: The mouse event with coordinates and all
         """
-        self.selectedPathPoints = []
-        self.pathPolyline = []
+        # Right-click confirms the current selection
+        # The profile is already built during left clicks, so we clear the helper line and mark as confirmed
         self.rbHelperLine.reset()
-        self.profile.reset()
-        self.segmentOffset = 0
+        self.isConfirmed = True
+        self.msgBar.pushMessage(
+            "Profile",
+            "Selection confirmed. Press ESC to clear and start over.",
+            level=Qgis.Info,
+            duration=3
+        )
+        self.logger.debug("Profile selection confirmed (right-click)")
+    
+    def keyPressEvent(self, event):
+        """
+        Handle keyboard events
+        ESC key cancels the current selection
+        
+        @param event: The keyboard event
+        """
+        if event.key() == Qt.Key_Escape:
+            # ESC key cancels selection
+            self.selectedPathPoints = []
+            self.pathPolyline = []
+            self.rbHelperLine.reset()
+            self.rubberBand.reset()
+            self.isConfirmed = False
+            if hasattr(self, 'rbHighlight'):
+                self.rbHighlight.reset()
+            self.profile.reset()
+            self.segmentOffset = 0
+            # Emit profileChanged signal to update the plot widget
+            self.profileChanged.emit(self.profile)
+            self.msgBar.pushMessage(
+                "Profile",
+                "Selection cleared. Right-click to confirm, ESC to clear.",
+                level=Qgis.Info,
+                duration=3
+            )
+            self.logger.debug("Profile selection cleared (ESC key)")
+        else:
+            # Call parent keyPressEvent for other keys
+            super().keyPressEvent(event)
 
     def leftClicked(self, event):
         """
@@ -464,6 +522,8 @@ class TwwProfileMapTool(TwwMapTool):
         match = self.snap_point(event)
 
         if match.isValid():
+            # Reset confirmed flag when adding new points
+            self.isConfirmed = False
             if self.selectedPathPoints:
                 pf = self.findPath(self.selectedPathPoints[-1][0], match.featureId())
                 if pf:

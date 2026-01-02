@@ -2,19 +2,16 @@ import collections
 import configparser
 import os
 import re
-from typing import Any
 
 from .plugin_utils import logger
 
 try:
     import psycopg
-    from psycopg import sql
 
     PSYCOPG_VERSION = 3
     DEFAULTS_CONN_ARG = {"autocommit": True}
 except ImportError:
     import psycopg2 as psycopg
-    from psycopg2 import sql
 
     PSYCOPG_VERSION = 2
     DEFAULTS_CONN_ARG = {}
@@ -50,30 +47,6 @@ class DatabaseUtils:
         def __exit__(self, exc_type, exc_val, exc_tb):
             self.connection.commit()
             self.connection.close()
-
-    @staticmethod
-    def wrap_identifier(identifier: str) -> Any:
-        """
-        Safely wrap an identifier (e.g., table or column name) for use in SQL.
-        Works with both psycopg2 and psycopg3.
-        """
-        return sql.Identifier(identifier)
-
-    @staticmethod
-    def wrap_literal(value: Any) -> Any:
-        """
-        Safely wrap a literal value for use in SQL.
-        Works with both psycopg2 and psycopg3.
-        """
-        return sql.Literal(value)
-
-    @staticmethod
-    def compose_sql(query: str, *args: Any, **kwargs: Any) -> Any:
-        """
-        Safely compose an SQL query with identifiers and values.
-        Works with both psycopg2 and psycopg3.
-        """
-        return sql.SQL(query).format(*args, **kwargs)
 
     @staticmethod
     def fetchone(query: str):
@@ -119,11 +92,7 @@ class DatabaseUtils:
             PG_CONFIG_PATH = os.path.join(os.environ.get("PGSYSCONFDIR"), "pg_service.conf")
             logger.debug(f"PGSYSCONFDIR:  {PG_CONFIG_PATH}")
         else:
-            if os.name == "nt":  # Windows
-                config_file = "pg_service.conf"
-            else:  # Unix-like (Linux, macOS)
-                config_file = ".pg_service.conf"
-            PG_CONFIG_PATH = os.path.expanduser(f"~/{config_file}")
+            PG_CONFIG_PATH = os.path.expanduser("~/.pg_service.conf")
             logger.debug(f"PG_CONFIG_PATH:  {PG_CONFIG_PATH}")
 
         config = configparser.ConfigParser()
@@ -264,8 +233,3 @@ class DatabaseUtils:
             messages.append("Symbology triggers are disabled")
 
         return messages
-
-    @staticmethod
-    def refresh_matviews():
-        logger.info("Refreshing materialized views")
-        DatabaseUtils.execute("SELECT tww_app.network_refresh_network_simple();")

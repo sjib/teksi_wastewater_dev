@@ -43,7 +43,7 @@ from .gui.twwsettingsdialog import TwwSettingsDialog
 from .gui.twwwizard import TwwWizard
 from .libs.modelbaker.iliwrapper.ili2dbutils import JavaNotFoundError
 from .processing_provider.provider import TwwProcessingProvider
-from .tools.twwmaptools import TwwMapToolConnectNetworkElements, TwwTreeMapTool
+from .tools.twwmaptools import TwwMapToolConnectNetworkElements, TwwTreeMapTool,TwwProfileMapTool
 from .tools.twwnetwork import TwwGraphManager
 from .utils.database_utils import DatabaseUtils
 from .utils.plugin_utils import plugin_root_path
@@ -115,7 +115,7 @@ class TeksiWastewaterPlugin:
         :param source_text: The text to translate
         :return: The translated text
         """
-        return QApplication.translate("TeksiWastewaterPlugin", source_text)
+        return QApplication.translate("TwwPlugin", source_text)
 
     def initLogger(self):
         """
@@ -174,15 +174,15 @@ class TeksiWastewaterPlugin:
         self.toolbarButtons = []
 
         # Create toolbar button
-        # self.profileAction = QAction(
-        #     QIcon(os.path.join(plugin_root_path(), "icons/wastewater-profile.svg")),
-        #     self.tr("Profile"),
-        #     self.iface.mainWindow(),
-        # )
-        # self.profileAction.setWhatsThis(self.tr("Reach trace"))
-        # self.profileAction.setEnabled(False)
-        # self.profileAction.setCheckable(True)
-        # self.profileAction.triggered.connect(self.profileToolClicked)
+        self.profileAction = QAction(
+            QIcon(os.path.join(plugin_root_path(), "icons/wastewater-profile.svg")),
+            self.tr("Profile"),
+            self.iface.mainWindow(),
+        )
+        self.profileAction.setWhatsThis(self.tr("Reach trace"))
+        self.profileAction.setEnabled(False)
+        self.profileAction.setCheckable(True)
+        self.profileAction.triggered.connect(self.profileToolClicked)
 
         self.downstreamAction = QAction(
             QIcon(os.path.join(plugin_root_path(), "icons/wastewater-downstream.svg")),
@@ -288,7 +288,7 @@ class TeksiWastewaterPlugin:
         # Add toolbar button and menu item
         self.toolbar = QToolBar(self.tr("TEKSI Wastewater"))
         self.toolbar.setObjectName(self.toolbar.windowTitle())
-        # self.toolbar.addAction(self.profileAction)
+        self.toolbar.addAction(self.profileAction)
         self.toolbar.addAction(self.upstreamAction)
         self.toolbar.addAction(self.downstreamAction)
         self.toolbar.addAction(self.wizardAction)
@@ -296,7 +296,7 @@ class TeksiWastewaterPlugin:
         self.toolbar.addAction(self.connectNetworkElementsAction)
 
         self.main_menu_name = "TEKSI &Wastewater"
-        # self.iface.addPluginToMenu(self.menu, self.profileAction)
+        self.iface.addPluginToMenu(self.main_menu_name, self.profileAction)
         self.iface.addPluginToMenu(self.main_menu_name, self.updateSymbologyAction)
         self.iface.addPluginToMenu(self.main_menu_name, self.validityCheckAction)
         self.iface.addPluginToMenu(self.main_menu_name, self.enableSymbologyTriggersAction)
@@ -313,7 +313,7 @@ class TeksiWastewaterPlugin:
         self.iface.addToolBar(self.toolbar)
 
         # Local array of buttons to enable / disable based on context
-        # self.toolbarButtons.append(self.profileAction)
+        self.toolbarButtons.append(self.profileAction)
         self.toolbarButtons.append(self.upstreamAction)
         self.toolbarButtons.append(self.downstreamAction)
         self.toolbarButtons.append(self.wizardAction)
@@ -331,10 +331,10 @@ class TeksiWastewaterPlugin:
         self.network_analyzer = TwwGraphManager()
         self.network_analyzer.message_emitted.connect(self.iface.messageBar().pushMessage)
         # Create the map tool for profile selection
-        # self.profile_tool = TwwProfileMapTool(
-        #    self.iface, self.profileAction, self.network_analyzer
-        # )
-        # self.profile_tool.profileChanged.connect(self.onProfileChanged)
+        self.profile_tool = TwwProfileMapTool(
+           self.iface, self.profileAction, self.network_analyzer
+        )
+        self.profile_tool.profileChanged.connect(self.onProfileChanged)
 
         self.upstream_tree_tool = TwwTreeMapTool(
             self.iface, self.upstreamAction, self.network_analyzer
@@ -366,9 +366,9 @@ class TeksiWastewaterPlugin:
 
         for message in messages:
             self.iface.messageBar().pushMessage(
-                "Warning",
+                "Error",
                 message,
-                level=Qgis.Warning,
+                level=Qgis.Critical,
             )
 
     def tww_validity_check_action(self):
@@ -430,7 +430,7 @@ class TeksiWastewaterPlugin:
         """
         Called when unloading
         """
-        # self.toolbar.removeAction(self.profileAction)
+        self.toolbar.removeAction(self.profileAction)
         self.toolbar.removeAction(self.upstreamAction)
         self.toolbar.removeAction(self.downstreamAction)
         self.toolbar.removeAction(self.wizardAction)
@@ -444,7 +444,7 @@ class TeksiWastewaterPlugin:
 
         self.toolbar.deleteLater()
 
-        # self.iface.removePluginMenu(self.menu, self.profileAction)
+        self.iface.removePluginMenu(self.main_menu_name, self.profileAction)
         self.iface.removePluginMenu(self.main_menu_name, self.updateSymbologyAction)
         self.iface.removePluginMenu(self.main_menu_name, self.validityCheckAction)
         self.iface.removePluginMenu(self.main_menu_name, self.settingsAction)
@@ -479,7 +479,7 @@ class TeksiWastewaterPlugin:
         """
         self.openDock()
         # Set the profile map tool
-        # self.profile_tool.setActive()
+        self.profile_tool.setActive()
 
     def upstreamToolClicked(self):
         """
@@ -528,13 +528,34 @@ class TeksiWastewaterPlugin:
 
             self.plotWidget = None
             if TwwPlotSVGWidget is not None:
-                self.plotWidget = TwwPlotSVGWidget(self.profile_dock, self.network_analyzer)
-                self.plotWidget.specialStructureMouseOver.connect(self.highlightProfileElement)
-                self.plotWidget.specialStructureMouseOut.connect(self.unhighlightProfileElement)
-                self.plotWidget.reachMouseOver.connect(self.highlightProfileElement)
-                self.plotWidget.reachMouseOut.connect(self.unhighlightProfileElement)
-                self.profile_dock.addPlotWidget(self.plotWidget)
-                self.profile_dock.setTree(self.nodes, self.edges)
+                try:
+                    self.logger.info("Creating TwwPlotSVGWidget...")
+                    self.plotWidget = TwwPlotSVGWidget(self.profile_dock, self.network_analyzer)
+                    self.logger.info("TwwPlotSVGWidget created successfully")
+                    self.plotWidget.specialStructureMouseOver.connect(self.highlightProfileElement)
+                    self.plotWidget.specialStructureMouseOut.connect(self.unhighlightProfileElement)
+                    self.plotWidget.reachMouseOver.connect(self.highlightProfileElement)
+                    self.plotWidget.reachMouseOut.connect(self.unhighlightProfileElement)
+                    self.logger.info("Adding plot widget to dock...")
+                    self.profile_dock.addPlotWidget(self.plotWidget)
+                    self.logger.info("Plot widget added to dock successfully")
+                    self.profile_dock.setTree(self.nodes, self.edges)
+                except Exception as e:
+                    import traceback
+                    self.logger.error(f"Failed to create plot widget: {e}")
+                    self.logger.error(traceback.format_exc())
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        self.tr("Profile Display Error"),
+                        self.tr("Unable to create plot window. QtWebKit/QtWebEngine is not available.\nError: {0}").format(str(e))
+                    )
+            else:
+                self.logger.warning("TwwPlotSVGWidget is None - import failed")
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    self.tr("Profile Display Error"),
+                    self.tr("Unable to create plot window. QtWebKit/QtWebEngine module is not available.\nPlease check your QGIS installation.")
+                )
 
     def onDockClosed(self):  # used when Dock dialog is closed
         """

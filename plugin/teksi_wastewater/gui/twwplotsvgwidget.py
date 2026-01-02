@@ -26,22 +26,67 @@ import logging
 
 from qgis.PyQt.QtCore import QSettings, Qt, QUrl, pyqtSignal, pyqtSlot
 from qgis.PyQt.QtPrintSupport import QPrinter, QPrintPreviewDialog
-from qgis.PyQt.QtWebKit import QWebSettings
-from qgis.PyQt.QtWebKitWidgets import QWebPage, QWebView
 from qgis.PyQt.QtWidgets import QVBoxLayout, QWidget
 
 from ..tools.twwnetwork import TwwGraphManager
 from ..utils.translation import TwwJsTranslator
 from ..utils.ui import plugin_root_path
 
+# Try to import QtWebEngine (preferred), fallback to QtWebKit if unavailable
+WEBENGINE_AVAILABLE = False
+WEBKIT_AVAILABLE = False
 
-class TwwWebPage(QWebPage):
+logger = logging.getLogger(__name__)
+
+try:
+    from qgis.PyQt.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings
+    from qgis.PyQt.QtWebChannel import QWebChannel
+    WEBENGINE_AVAILABLE = True
+    logger.info("QtWebEngine is available")
+except ImportError as e:
+    logger.debug(f"QtWebEngine not available: {e}")
+    try:
+        # Fallback to QtWebKit if available
+        from qgis.PyQt.QtWebKit import QWebSettings
+        from qgis.PyQt.QtWebKitWidgets import QWebPage, QWebView
+        WEBKIT_AVAILABLE = True
+        logger.info("QtWebKit is available (fallback)")
+    except ImportError as e2:
+        logger.warning(f"Neither QtWebEngine nor QtWebKit is available. QtWebEngine error: {e}, QtWebKit error: {e2}")
+        pass
+
+
+class TwwWebPage:
+    """Web page class supporting both QtWebEngine and QtWebKit"""
     logger = logging.getLogger(__name__)
 
     def __init__(self, parent):
-        QWebPage.__init__(self, parent)
+        if WEBENGINE_AVAILABLE:
+            self.page = QWebEnginePage(parent)
+            # QtWebEngine uses javascriptConsoleMessage signal
+            self.page.javaScriptConsoleMessage.connect(self.onJavaScriptConsoleMessage)
+        elif WEBKIT_AVAILABLE:
+            self.page = QWebPage(parent)
+            # QtWebKit uses javaScriptConsoleMessage method
+            # This method will be overridden in a subclass
+        else:
+            raise ImportError("Neither QtWebEngine nor QtWebKit is available")
+    
+    def __getattr__(self, name):
+        # Proxy all attribute access to the actual page object
+        return getattr(self.page, name)
+    
+    def onJavaScriptConsoleMessage(self, level, msg, line, source):
+        """Handle JavaScript console messages for QtWebEngine"""
+        self.logger.debug(f"{source} line {line}: {msg}")
+
+
+class TwwWebKitPage(QWebPage):
+    """Web page class specifically for QtWebKit"""
+    logger = logging.getLogger(__name__)
 
     def javaScriptConsoleMessage(self, msg, line, source):
+        """Handle JavaScript console messages for QtWebKit"""
         self.logger.debug(f"{source} line {line}: {msg}")
 
 
@@ -52,6 +97,7 @@ class TwwPlotSVGWidget(QWidget):
     profile = None
     verticalExaggeration = 10
     jsTranslator = TwwJsTranslator()
+    webChannel = None
 
     # Signals emitted triggered by javascript actions
     reachClicked = pyqtSignal([str], name="reachClicked")
@@ -70,42 +116,117 @@ class TwwPlotSVGWidget(QWidget):
 
     def __init__(self, parent, network_analyzer: TwwGraphManager, url: str = None):
         QWidget.__init__(self, parent)
+        
+        logger = logging.getLogger(__name__)
+        logger.info(f"Initializing TwwPlotSVGWidget - WEBENGINE_AVAILABLE: {WEBENGINE_AVAILABLE}, WEBKIT_AVAILABLE: {WEBKIT_AVAILABLE}")
 
-        self.webView = QWebView()
-        self.webView.setPage(TwwWebPage(self.webView))
+        if not WEBENGINE_AVAILABLE and not WEBKIT_AVAILABLE:
+            error_msg = "Neither QtWebEngine nor QtWebKit is available"
+            logger.error(error_msg)
+            raise ImportError(error_msg)
+
+        # Create WebView
+        if WEBENGINE_AVAILABLE:
+            logger.info("Using QtWebEngine")
+            self.webView = QWebEngineView()
+            self.webPage = TwwWebPage(self.webView)
+            self.webView.setPage(self.webPage.page)
+            # Set up WebChannel for JavaScript communication
+            self.webChannel = QWebChannel(self.webView.page())
+            self.webView.page().setWebChannel(self.webChannel)
+        else:
+            logger.info("Using QtWebKit")
+            self.webView = QWebView()
+            self.webPage = TwwWebKitPage(self.webView)
+            self.webView.setPage(self.webPage)
 
         self.networkAnalyzer = network_analyzer
 
         settings = QSettings()
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
         if url is None:
             # Starting with QGIS 3.4, QWebView requires paths with / even on windows.
             default_url = plugin_root_path().replace("\\", "/") + "/svgprofile/index.html"
             url = settings.value("/TWW/SvgProfilePath", default_url)
             url = "file:///" + url
+        
+        logger.info(f"Loading profile HTML from: {url}")
 
         developer_mode = settings.value("/TWW/DeveloperMode", False, type=bool)
 
-        if developer_mode is True:
-            self.webView.page().settings().setAttribute(QWebSettings.DeveloperExtrasEnabled, True)
+        if WEBENGINE_AVAILABLE:
+            if developer_mode is True:
+                self.webView.page().settings().setAttribute(QWebEngineSettings.WebAttribute.DeveloperExtrasEnabled, True)
+            else:
+                self.webView.setContextMenuPolicy(Qt.NoContextMenu)
+            
+            self.webView.load(QUrl(url))
+            # Wait for page to finish loading before initializing JavaScript
+            self.webView.page().loadFinished.connect(self.onPageLoadFinished)
+            logger.info("QtWebEngine: Connected loadFinished signal")
         else:
-            self.webView.setContextMenuPolicy(Qt.NoContextMenu)
+            if developer_mode is True:
+                self.webView.page().settings().setAttribute(QWebSettings.DeveloperExtrasEnabled, True)
+            else:
+                self.webView.setContextMenuPolicy(Qt.NoContextMenu)
+            
+            self.webView.load(QUrl(url))
+            self.frame = self.webView.page().mainFrame()
+            self.frame.javaScriptWindowObjectCleared.connect(self.initJs)
+            logger.info("QtWebKit: Connected javaScriptWindowObjectCleared signal")
 
-        self.webView.load(QUrl(url))
-        self.frame = self.webView.page().mainFrame()
-        self.frame.javaScriptWindowObjectCleared.connect(self.initJs)
-
+        # Set minimum size for WebView
+        self.webView.setMinimumSize(400, 300)
+        self.setMinimumSize(400, 300)
+        
         layout.addWidget(self.webView)
+        logger.info("WebView added to layout")
+        
+        # Ensure the widget is visible
+        self.webView.show()
+        self.show()
 
     def setProfile(self, profile):
         self.profile = profile
         # Forward to javascript
         self.profileChanged.emit(profile.asJson())
 
+    def onPageLoadFinished(self, success):
+        """Called when page loading is finished, used for QtWebEngine"""
+        logger = logging.getLogger(__name__)
+        logger.info(f"Page load finished, success: {success}")
+        if success:
+            # Check if page loaded correctly
+            self.webView.page().runJavaScript("document.readyState", lambda result: logger.info(f"Page readyState: {result}"))
+            self.webView.page().runJavaScript("typeof profileProxy", lambda result: logger.info(f"profileProxy type: {result}"))
+            self.initJs()
+        else:
+            logger.warning("Page load failed")
+            # Try to get error information
+            if WEBENGINE_AVAILABLE:
+                self.webView.page().runJavaScript("document.title", lambda result: logger.warning(f"Page title after failed load: {result}"))
+
     def initJs(self):
-        self.frame.addToJavaScriptWindowObject("profileProxy", self)
-        self.frame.addToJavaScriptWindowObject("i18n", self.jsTranslator)
+        """Initialize JavaScript bridge"""
+        logger = logging.getLogger(__name__)
+        logger.info("Initializing JavaScript bridge")
+        if WEBENGINE_AVAILABLE:
+            # Register objects using WebChannel
+            # The WebChannel initialization code in the HTML file will automatically set these objects on window
+            self.webChannel.registerObject("profileProxy", self)
+            self.webChannel.registerObject("i18n", self.jsTranslator)
+            logger.info("Registered objects with WebChannel: profileProxy, i18n")
+        else:
+            if self.frame:
+                self.frame.addToJavaScriptWindowObject("profileProxy", self)
+                self.frame.addToJavaScriptWindowObject("i18n", self.jsTranslator)
+                logger.info("Added objects to JavaScript window: profileProxy, i18n")
+            else:
+                logger.warning("Frame is None, cannot add JavaScript objects")
 
     def changeVerticalExaggeration(self, val):
         self.verticalExaggeration = val
@@ -124,7 +245,11 @@ class TwwPlotSVGWidget(QWidget):
 
     @pyqtSlot(QPrinter)
     def printRequested(self, printer):
-        self.webView.print_(printer)
+        """Handle print request"""
+        if WEBENGINE_AVAILABLE:
+            self.webView.page().print(printer, lambda success: None)
+        else:
+            self.webView.print_(printer)
 
     @pyqtSlot(str)
     def onReachClicked(self, obj_id):

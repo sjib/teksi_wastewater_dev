@@ -10,6 +10,18 @@
         }]
       };
     </script>
+    <!-- WebChannel support (for QtWebEngine) -->
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <script>
+      // Initialize WebChannel (only when using QtWebEngine)
+      if (typeof qt !== 'undefined' && qt.webChannelTransport) {
+        new QWebChannel(qt.webChannelTransport, function(channel) {
+          // Register to global objects for backward compatibility
+          window.profileProxy = channel.objects.profileProxy;
+          window.i18n = channel.objects.i18n;
+        });
+      }
+    </script>
     <script src="dojo.js" data-dojo-config="async: true"></script>
     <script src="d3.v2.min.js"></script>
     <script src="utils/translation.js"></script>

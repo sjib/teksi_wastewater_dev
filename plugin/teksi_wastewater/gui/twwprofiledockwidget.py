@@ -88,8 +88,13 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
     def addPlotWidget(self, plot_widget):
         self.plotWidget = plot_widget
         self.verticalLayoutForPlot.addWidget(self.plotWidget)
+        # Ensure the plot widget expands to fill available space
+        self.verticalLayoutForPlot.setStretchFactor(self.plotWidget, 1)
         ve_val = self.veLUT[self.mSliderVerticalExaggeration.value()]
         self.plotWidget.changeVerticalExaggeration(ve_val)
+        # Force update to ensure visibility
+        self.plotWidget.update()
+        self.plotWidget.show()
 
     @pyqtSlot(int)
     def onVerticalExaggerationChanged(self, value):

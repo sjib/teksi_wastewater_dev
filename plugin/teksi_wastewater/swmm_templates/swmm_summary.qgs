@@ -533,7 +533,7 @@
       <layerOpacity>1</layerOpacity>
       <SingleCategoryDiagramRenderer diagramType="Histogram" attributeLegend="1">
         <DiagramCategory penWidth="0" sizeType="MM" minimumSize="0" diagramOrientation="Up" opacity="1" lineSizeType="MM" scaleDependency="Area" backgroundColor="#ffffff" barWidth="5" height="15" lineSizeScale="3x:0,0,0,0,0,0" width="15" backgroundAlpha="255" minScaleDenominator="0" scaleBasedVisibility="0" penAlpha="255" labelPlacementMethod="XHeight" enabled="0" sizeScale="3x:0,0,0,0,0,0" maxScaleDenominator="1e+08" rotationOffset="270" penColor="#000000">
-          <fontProperties style="" description="MS Shell Dlg 2,8.25,-1,5,50,0,0,0,0,0"/>
+          <fontProperties style="" description="Arial,8.25,-1,5,50,0,0,0,0,0"/>
           <attribute field="" label="" color="#000000"/>
         </DiagramCategory>
       </SingleCategoryDiagramRenderer>
@@ -1032,7 +1032,7 @@ def my_form_open(dialog, layer, feature):
       <layerOpacity>1</layerOpacity>
       <SingleCategoryDiagramRenderer diagramType="Histogram" attributeLegend="1">
         <DiagramCategory penWidth="0" sizeType="MM" minimumSize="0" diagramOrientation="Up" opacity="1" lineSizeType="MM" scaleDependency="Area" backgroundColor="#ffffff" barWidth="5" height="15" lineSizeScale="3x:0,0,0,0,0,0" width="15" backgroundAlpha="255" minScaleDenominator="0" scaleBasedVisibility="0" penAlpha="255" labelPlacementMethod="XHeight" enabled="0" sizeScale="3x:0,0,0,0,0,0" maxScaleDenominator="1e+08" rotationOffset="270" penColor="#000000">
-          <fontProperties style="" description="MS Shell Dlg 2,8.25,-1,5,50,0,0,0,0,0"/>
+          <fontProperties style="" description="Arial,8.25,-1,5,50,0,0,0,0,0"/>
           <attribute field="" label="" color="#000000"/>
         </DiagramCategory>
       </SingleCategoryDiagramRenderer>
@@ -1548,7 +1548,7 @@ def my_form_open(dialog, layer, feature):
       <layerOpacity>1</layerOpacity>
       <SingleCategoryDiagramRenderer diagramType="Histogram" attributeLegend="1">
         <DiagramCategory penWidth="0" sizeType="MM" minimumSize="0" diagramOrientation="Up" opacity="1" lineSizeType="MM" scaleDependency="Area" backgroundColor="#ffffff" barWidth="5" height="15" lineSizeScale="3x:0,0,0,0,0,0" width="15" backgroundAlpha="255" minScaleDenominator="0" scaleBasedVisibility="0" penAlpha="255" labelPlacementMethod="XHeight" enabled="0" sizeScale="3x:0,0,0,0,0,0" maxScaleDenominator="1e+08" rotationOffset="270" penColor="#000000">
-          <fontProperties style="" description="MS Shell Dlg 2,8.25,-1,5,50,0,0,0,0,0"/>
+          <fontProperties style="" description="Arial,8.25,-1,5,50,0,0,0,0,0"/>
           <attribute field="" label="" color="#000000"/>
         </DiagramCategory>
       </SingleCategoryDiagramRenderer>
@@ -2064,7 +2064,7 @@ def my_form_open(dialog, layer, feature):
       <layerOpacity>1</layerOpacity>
       <SingleCategoryDiagramRenderer diagramType="Histogram" attributeLegend="1">
         <DiagramCategory penWidth="0" sizeType="MM" minimumSize="0" diagramOrientation="Up" opacity="1" lineSizeType="MM" scaleDependency="Area" backgroundColor="#ffffff" barWidth="5" height="15" lineSizeScale="3x:0,0,0,0,0,0" width="15" backgroundAlpha="255" minScaleDenominator="0" scaleBasedVisibility="0" penAlpha="255" labelPlacementMethod="XHeight" enabled="0" sizeScale="3x:0,0,0,0,0,0" maxScaleDenominator="1e+08" rotationOffset="270" penColor="#000000">
-          <fontProperties style="" description="MS Shell Dlg 2,8.25,-1,5,50,0,0,0,0,0"/>
+          <fontProperties style="" description="Arial,8.25,-1,5,50,0,0,0,0,0"/>
           <attribute field="" label="" color="#000000"/>
         </DiagramCategory>
       </SingleCategoryDiagramRenderer>
@@ -2524,7 +2524,7 @@ def my_form_open(dialog, layer, feature):
       <layerOpacity>1</layerOpacity>
       <SingleCategoryDiagramRenderer diagramType="Histogram" attributeLegend="1">
         <DiagramCategory penWidth="0" sizeType="MM" minimumSize="0" diagramOrientation="Up" opacity="1" lineSizeType="MM" scaleDependency="Area" backgroundColor="#ffffff" barWidth="5" height="15" lineSizeScale="3x:0,0,0,0,0,0" width="15" backgroundAlpha="255" minScaleDenominator="0" scaleBasedVisibility="0" penAlpha="255" labelPlacementMethod="XHeight" enabled="0" sizeScale="3x:0,0,0,0,0,0" maxScaleDenominator="1e+08" rotationOffset="270" penColor="#000000">
-          <fontProperties style="" description="MS Shell Dlg 2,8.25,-1,5,50,0,0,0,0,0"/>
+          <fontProperties style="" description="Arial,8.25,-1,5,50,0,0,0,0,0"/>
           <attribute field="" label="" color="#000000"/>
         </DiagramCategory>
       </SingleCategoryDiagramRenderer>
@@ -3013,7 +3013,7 @@ def my_form_open(dialog, layer, feature):
       <layerOpacity>1</layerOpacity>
       <SingleCategoryDiagramRenderer diagramType="Histogram" attributeLegend="1">
         <DiagramCategory penWidth="0" sizeType="MM" minimumSize="0" diagramOrientation="Up" opacity="1" lineSizeType="MM" scaleDependency="Area" backgroundColor="#ffffff" barWidth="5" height="15" lineSizeScale="3x:0,0,0,0,0,0" width="15" backgroundAlpha="255" minScaleDenominator="0" scaleBasedVisibility="0" penAlpha="255" labelPlacementMethod="XHeight" enabled="0" sizeScale="3x:0,0,0,0,0,0" maxScaleDenominator="1e+08" rotationOffset="270" penColor="#000000">
-          <fontProperties style="" description="MS Shell Dlg 2,8.25,-1,5,50,0,0,0,0,0"/>
+          <fontProperties style="" description="Arial,8.25,-1,5,50,0,0,0,0,0"/>
           <attribute field="" label="" color="#000000"/>
         </DiagramCategory>
       </SingleCategoryDiagramRenderer>
@@ -3484,7 +3484,7 @@ def my_form_open(dialog, layer, feature):
       <layerOpacity>1</layerOpacity>
       <SingleCategoryDiagramRenderer diagramType="Histogram" attributeLegend="1">
         <DiagramCategory penWidth="0" sizeType="MM" minimumSize="0" diagramOrientation="Up" opacity="1" lineSizeType="MM" scaleDependency="Area" backgroundColor="#ffffff" barWidth="5" height="15" lineSizeScale="3x:0,0,0,0,0,0" width="15" backgroundAlpha="255" minScaleDenominator="0" scaleBasedVisibility="0" penAlpha="255" labelPlacementMethod="XHeight" enabled="0" sizeScale="3x:0,0,0,0,0,0" maxScaleDenominator="1e+08" rotationOffset="270" penColor="#000000">
-          <fontProperties style="" description="MS Shell Dlg 2,8.25,-1,5,50,0,0,0,0,0"/>
+          <fontProperties style="" description="Arial,8.25,-1,5,50,0,0,0,0,0"/>
           <attribute field="" label="" color="#000000"/>
         </DiagramCategory>
       </SingleCategoryDiagramRenderer>
@@ -4927,7 +4927,7 @@ def my_form_open(dialog, layer, feature):
       <layerOpacity>1</layerOpacity>
       <SingleCategoryDiagramRenderer diagramType="Histogram" attributeLegend="1">
         <DiagramCategory penWidth="0" sizeType="MM" minimumSize="0" diagramOrientation="Up" opacity="1" lineSizeType="MM" scaleDependency="Area" backgroundColor="#ffffff" barWidth="5" height="15" lineSizeScale="3x:0,0,0,0,0,0" width="15" backgroundAlpha="255" minScaleDenominator="0" scaleBasedVisibility="0" penAlpha="255" labelPlacementMethod="XHeight" enabled="0" sizeScale="3x:0,0,0,0,0,0" maxScaleDenominator="1e+08" rotationOffset="270" penColor="#000000">
-          <fontProperties style="" description="MS Shell Dlg 2,8.25,-1,5,50,0,0,0,0,0"/>
+          <fontProperties style="" description="Arial,8.25,-1,5,50,0,0,0,0,0"/>
           <attribute field="" label="" color="#000000"/>
         </DiagramCategory>
       </SingleCategoryDiagramRenderer>
@@ -5276,7 +5276,7 @@ def my_form_open(dialog, layer, feature):
       <layerOpacity>1</layerOpacity>
       <SingleCategoryDiagramRenderer diagramType="Histogram" attributeLegend="1">
         <DiagramCategory penWidth="0" sizeType="MM" minimumSize="0" diagramOrientation="Up" opacity="1" lineSizeType="MM" scaleDependency="Area" backgroundColor="#ffffff" barWidth="5" height="15" lineSizeScale="3x:0,0,0,0,0,0" width="15" backgroundAlpha="255" minScaleDenominator="0" scaleBasedVisibility="0" penAlpha="255" labelPlacementMethod="XHeight" enabled="0" sizeScale="3x:0,0,0,0,0,0" maxScaleDenominator="1e+08" rotationOffset="270" penColor="#000000">
-          <fontProperties style="" description="MS Shell Dlg 2,8.25,-1,5,50,0,0,0,0,0"/>
+          <fontProperties style="" description="Arial,8.25,-1,5,50,0,0,0,0,0"/>
           <attribute field="" label="" color="#000000"/>
         </DiagramCategory>
       </SingleCategoryDiagramRenderer>
@@ -6603,7 +6603,7 @@ def my_form_open(dialog, layer, feature):
       <layerOpacity>1</layerOpacity>
       <SingleCategoryDiagramRenderer diagramType="Histogram" attributeLegend="1">
         <DiagramCategory penWidth="0" sizeType="MM" minimumSize="0" diagramOrientation="Up" opacity="1" lineSizeType="MM" scaleDependency="Area" backgroundColor="#ffffff" barWidth="5" height="15" lineSizeScale="3x:0,0,0,0,0,0" width="15" backgroundAlpha="255" minScaleDenominator="0" scaleBasedVisibility="0" penAlpha="255" labelPlacementMethod="XHeight" enabled="0" sizeScale="3x:0,0,0,0,0,0" maxScaleDenominator="1e+08" rotationOffset="270" penColor="#000000">
-          <fontProperties style="" description="MS Shell Dlg 2,8.25,-1,5,50,0,0,0,0,0"/>
+          <fontProperties style="" description="Arial,8.25,-1,5,50,0,0,0,0,0"/>
           <attribute field="" label="" color="#000000"/>
         </DiagramCategory>
       </SingleCategoryDiagramRenderer>
