@@ -430,11 +430,28 @@ class TwwFeatureCache:
     def attrAsGeometry(self, feat, attr):
         """
         Get an attribute as geometry
+        Handles both EWKT string (older QGIS versions) and QgsGeometry/QgsReferencedGeometry objects (QGIS 3.40+)
         """
-        ewktstring = self.attrAsUnicode(feat, attr)
-        # Strip SRID=21781; token, TODO: Fix this upstream
-        m = re.search("(.*;)?(.*)", ewktstring)
-        return QgsGeometry.fromWkt(m.group(2))
+        attr_value = self.attr(feat, attr)
+        
+        if attr_value is None:
+            return None
+        
+        # Check if it's already a geometry object (QGIS 3.40+ may return QgsReferencedGeometry directly)
+        from qgis.core import QgsGeometry, QgsReferencedGeometry
+        
+        if isinstance(attr_value, QgsReferencedGeometry):
+            # Convert QgsReferencedGeometry to QgsGeometry
+            return QgsGeometry(attr_value)
+        elif isinstance(attr_value, QgsGeometry):
+            # Already a QgsGeometry
+            return attr_value
+        else:
+            # Treat as EWKT string (old behavior for older QGIS versions or text fields)
+            ewktstring = str(attr_value)
+            # Strip SRID=21781; token, TODO: Fix this upstream
+            m = re.search("(.*;)?(.*)", ewktstring)
+            return QgsGeometry.fromWkt(m.group(2))
 
     def asDict(self) -> dict:
         """
