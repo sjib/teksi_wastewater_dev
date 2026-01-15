@@ -456,14 +456,23 @@ class TwwProfileMapTool(TwwMapTool):
     def rightClicked(self, _):
         """
         Cancel any ongoing path selection
+        
+        First right-click: Cancel mouse attachment (ongoing selection)
+        Second right-click: Clear the selected path line
 
         @param event: The mouse event with coordinates and all
         """
-        self.selectedPathPoints = []
-        self.pathPolyline = []
-        self.rbHelperLine.reset()
-        self.profile.reset()
-        self.segmentOffset = 0
+        # If there's an ongoing selection, just cancel it (first right-click)
+        if self.selectedPathPoints:
+            self.selectedPathPoints = []
+            self.rbHelperLine.reset()
+        else:
+            # No ongoing selection, clear everything (second right-click)
+            self.pathPolyline = []
+            self.rubberBand.reset()  # Clear the path visualization
+            self.rbHelperLine.reset()
+            self.profile.reset()
+            self.segmentOffset = 0
 
     def leftClicked(self, event):
         """
