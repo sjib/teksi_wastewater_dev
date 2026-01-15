@@ -419,10 +419,20 @@ class TwwProfileMapTool(TwwMapTool):
                 self.segmentOffset = to_offset
 
             # Create rubberband geometry
+            # Reset pathPolyline for this segment (but keep previous segments if this is a continuation)
+            segment_polyline = []
             for feat_id in edge_ids:
-                self.pathPolyline.extend(edge_features[feat_id].geometry().asPolyline())
+                segment_polyline.extend(edge_features[feat_id].geometry().asPolyline())
+            
+            # Add this segment to the overall path
+            self.pathPolyline.extend(segment_polyline)
 
             self.rubberBand.addGeometry(QgsGeometry.fromPolylineXY(self.pathPolyline), node_layer)
+            
+            # Debug output
+            self.logger.debug(f"appendProfile: pathPolyline now has {len(self.pathPolyline)} points")
+            self.logger.debug(f"appendProfile: Emitting profileChanged signal with {len(self.profile.getElements())} elements")
+            
             self.profileChanged.emit(self.profile)
             return True
         else:

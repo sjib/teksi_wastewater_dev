@@ -479,7 +479,7 @@ class TeksiWastewaterPlugin:
             b.setEnabled(False)
 
 
-    def profileToolClicked2(self):
+    def profileToolClicked(self):
         """
         Is executed when the profile button is clicked
         """
@@ -488,7 +488,7 @@ class TeksiWastewaterPlugin:
         # Set the profile map tool
         self.profile_tool.setActive()
 
-    def profileToolClicked(self):
+    def profileToolClicked2(self):
         """
         Is executed when the profile button is clicked
         """
@@ -963,49 +963,84 @@ class TeksiWastewaterPlugin:
             elif hasattr(self.plotWidget, 'setProfileCurve'):
                 from qgis.core import QgsGeometry
                 
+                self.logger.debug(f"onProfileChanged: Received new profile with {len(profile.getElements())} elements")
                 print(f"✓ onProfileChanged: Received new profile with {len(profile.getElements())} elements")
                 
                 # Get geometry directly from profile_tool's pathPolyline
                 # This is already in the correct order (built in appendProfile)
-                if hasattr(self, 'profile_tool') and hasattr(self.profile_tool, 'pathPolyline') and self.profile_tool.pathPolyline:
-                    print(f"✓ Using profile_tool.pathPolyline with {len(self.profile_tool.pathPolyline)} points")
-                    profile_geometry = QgsGeometry.fromPolylineXY(self.profile_tool.pathPolyline)
-                    self.plotWidget.setProfileCurve(profile_geometry)
-                else:
-                    # Fallback: build from profile elements (with sorting by offset)
-                    print(f"⚠ profile_tool.pathPolyline not available, trying to build from profile elements")
-                    from qgis.core import QgsPointXY
-                    
-                    reach_elements = [
-                        elem for elem in profile.getElements() 
-                        if hasattr(elem, 'type') and elem.type == "reach" and hasattr(elem, 'detail_geometry') and elem.detail_geometry
-                    ]
-                    
-                    if reach_elements:
-                        # Sort by start offset
-                        def get_start_offset(elem):
-                            if hasattr(elem, 'reachPoints') and elem.reachPoints:
-                                offsets = [p.get('offset', 0) for p in elem.reachPoints.values() if 'offset' in p]
-                                return min(offsets) if offsets else 0
-                            return 0
+                if hasattr(self, 'profile_tool') and hasattr(self.profile_tool, 'pathPolyline'):
+                    path_polyline = self.profile_tool.pathPolyline
+                    if path_polyline and len(path_polyline) > 0:
+                        self.logger.debug(f"onProfileChanged: Using profile_tool.pathPolyline with {len(path_polyline)} points")
+                        print(f"✓ Using profile_tool.pathPolyline with {len(path_polyline)} points")
+                        print(f"  First point: {path_polyline[0]}, Last point: {path_polyline[-1]}")
                         
-                        reach_elements_sorted = sorted(reach_elements, key=get_start_offset)
-                        
-                        points = []
-                        for elem in reach_elements_sorted:
-                            if elem.detail_geometry:
-                                geom_points = elem.detail_geometry.asPolyline()
-                                if points:
-                                    if points[-1] == geom_points[0]:
-                                        points.extend(geom_points[1:])
-                                    else:
-                                        points.extend(geom_points)
-                                else:
-                                    points.extend(geom_points)
-                        
-                        if points:
-                            profile_geometry = QgsGeometry.fromPolylineXY(points)
+                        profile_geometry = QgsGeometry.fromPolylineXY(path_polyline)
+                        if profile_geometry and not profile_geometry.isEmpty():
+                            self.logger.debug(f"onProfileChanged: Calling setProfileCurve with geometry")
+                            print(f"✓ Calling setProfileCurve with geometry")
                             self.plotWidget.setProfileCurve(profile_geometry)
+                        else:
+                            self.logger.warning("onProfileChanged: Geometry is empty or invalid")
+                            print(f"✗ Geometry is empty or invalid")
+                    else:
+                        self.logger.warning("onProfileChanged: pathPolyline is empty")
+                        print(f"⚠ profile_tool.pathPolyline is empty, trying to build from profile elements")
+                        # Fallback: build from profile elements
+                        self._buildProfileFromElements(profile)
+                else:
+                    self.logger.warning("onProfileChanged: profile_tool or pathPolyline not available")
+                    print(f"⚠ profile_tool.pathPolyline not available, trying to build from profile elements")
+                    # Fallback: build from profile elements
+                    self._buildProfileFromElements(profile)
+    
+    def _buildProfileFromElements(self, profile):
+        """
+        Fallback method to build profile geometry from profile elements.
+        """
+        from qgis.core import QgsGeometry, QgsPointXY
+        
+        reach_elements = [
+            elem for elem in profile.getElements() 
+            if hasattr(elem, 'type') and elem.type == "reach" and hasattr(elem, 'detail_geometry') and elem.detail_geometry
+        ]
+        
+        if reach_elements:
+            self.logger.debug(f"_buildProfileFromElements: Found {len(reach_elements)} reach elements")
+            print(f"  Found {len(reach_elements)} reach elements")
+            
+            # Sort by start offset
+            def get_start_offset(elem):
+                if hasattr(elem, 'reachPoints') and elem.reachPoints:
+                    offsets = [p.get('offset', 0) for p in elem.reachPoints.values() if 'offset' in p]
+                    return min(offsets) if offsets else 0
+                return 0
+            
+            reach_elements_sorted = sorted(reach_elements, key=get_start_offset)
+            
+            points = []
+            for elem in reach_elements_sorted:
+                if elem.detail_geometry:
+                    geom_points = elem.detail_geometry.asPolyline()
+                    if points:
+                        if points[-1] == geom_points[0]:
+                            points.extend(geom_points[1:])
+                        else:
+                            points.extend(geom_points)
+                    else:
+                        points.extend(geom_points)
+            
+            if points:
+                self.logger.debug(f"_buildProfileFromElements: Built polyline with {len(points)} points")
+                print(f"  Built polyline with {len(points)} points")
+                profile_geometry = QgsGeometry.fromPolylineXY(points)
+                self.plotWidget.setProfileCurve(profile_geometry)
+            else:
+                self.logger.warning("_buildProfileFromElements: No points extracted from reach elements")
+                print(f"✗ No points extracted from reach elements")
+        else:
+            self.logger.warning("_buildProfileFromElements: No reach elements found in profile")
+            print(f"✗ No reach elements found in profile")
 
     def onTreeChanged(self, nodes, edges):
         if self.profile_dock:

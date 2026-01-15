@@ -58,6 +58,9 @@ class TwwElevationProfileWidget(QWidget):
         # Vertical exaggeration value (default 10x)
         self.verticalExaggeration = 10.0
         
+        # Track if data sources have been set up
+        self._data_sources_setup = False
+        
         # Set initial visible range immediately when widget is created
         self._setInitialVisibleRange()
 
@@ -97,6 +100,9 @@ class TwwElevationProfileWidget(QWidget):
         This method sets up the reach layer as a data source for the profile.
         In QGIS 3.40+, we use setLayers() directly instead of ProfileSource objects.
         """
+        print("=" * 60)
+        print("setupDataSources: Starting data source setup...")
+        
         # Get the reach layer
         # Try vw_tww_reach first (has 3D geometry), fallback to vw_network_segment
         from ..utils.twwlayermanager import TwwLayerManager
@@ -104,14 +110,20 @@ class TwwElevationProfileWidget(QWidget):
         
         reach_layer = TwwLayerManager.layer("vw_tww_reach")
         if not reach_layer:
+            print("  vw_tww_reach not found, trying vw_network_segment...")
             # Fallback to vw_network_segment
             reach_layer = TwwLayerManager.layer("vw_network_segment")
         
         if not reach_layer:
             print("✗ setupDataSources: Layer vw_tww_reach or vw_network_segment not found")
+            print("  Available layers in project:")
+            from qgis.core import QgsProject
+            for layer_id, layer in QgsProject.instance().mapLayers().items():
+                print(f"    - {layer.name()} (ID: {layer_id})")
+            print("=" * 60)
             return
         
-        print(f"✓ setupDataSources: Found layer {reach_layer.name()}")
+        print(f"✓ setupDataSources: Found layer {reach_layer.name()} (ID: {reach_layer.id()})")
         
         # Check geometry type and sample data
         from qgis.core import QgsWkbTypes
@@ -145,14 +157,23 @@ class TwwElevationProfileWidget(QWidget):
                 # Check elevation field values (check multiple possible field names)
                 elevation_fields = ['bottom_level', 'rp_from_level', 'rp_to_level', 'level', 'elevation']
                 found_elevation = False
+                sample_elevation_values = []  # Collect sample elevation values
                 for field_name in elevation_fields:
                     if field_name in reach_layer.fields().names():
                         value = sample_feature.attribute(field_name)
                         print(f"  Sample feature {field_name} field value: {value}")
                         if value is not None:
                             found_elevation = True
+                            try:
+                                sample_elevation_values.append(float(value))
+                            except:
+                                pass
                 if not found_elevation:
                     print(f"  ⚠ All elevation fields are NULL, available fields: {[f.name() for f in reach_layer.fields()]}")
+                elif sample_elevation_values:
+                    # Store sample elevation values for later use
+                    self._sample_elevation_values = sample_elevation_values
+                    print(f"  ✓ Collected {len(sample_elevation_values)} sample elevation values: {sample_elevation_values}")
         
         # Check and configure elevation properties
         elevation_props = reach_layer.elevationProperties()
@@ -176,10 +197,16 @@ class TwwElevationProfileWidget(QWidget):
                         print("  ✓ Layer elevation enabled")
                         # Force layer to recognize the change
                         reach_layer.triggerRepaint()
+                        # Verify it was enabled
+                        if hasattr(elevation_props, 'isEnabled'):
+                            verify_enabled = elevation_props.isEnabled()
+                            print(f"  ✓ Verified elevation is enabled: {verify_enabled}")
                     else:
                         print("  ✓ Layer elevation already enabled")
                 except Exception as e:
                     print(f"  ⚠ Failed to enable elevation: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             # For QgsVectorLayerElevationProperties, check current configuration
             from qgis.core import QgsVectorLayerElevationProperties
@@ -280,8 +307,22 @@ class TwwElevationProfileWidget(QWidget):
         
         # In QGIS 3.40+, we can directly set layers using setLayers()
         # The canvas will automatically use the layer's elevation configuration
-        self.canvas.setLayers([reach_layer])
-        print(f"✓ Layer set to canvas")
+        try:
+            self.canvas.setLayers([reach_layer])
+            print(f"✓ Layer set to canvas: {reach_layer.name()}")
+            
+            # Verify the layer was actually set
+            if hasattr(self.canvas, 'layers'):
+                canvas_layers = self.canvas.layers()
+                if canvas_layers and reach_layer in canvas_layers:
+                    print(f"✓ Verified: Layer is correctly set on canvas")
+                else:
+                    print(f"⚠ WARNING: Layer may not be correctly set on canvas")
+                    print(f"  Canvas layers: {[l.name() for l in (canvas_layers or [])]}")
+        except Exception as e:
+            print(f"✗ Error setting layers to canvas: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Set tolerance (distance from profile curve to include features, in map units)
         self.canvas.setTolerance(10.0)  # 10 meters (adjust as needed)
@@ -302,10 +343,53 @@ class TwwElevationProfileWidget(QWidget):
             layers = self.canvas.layers()
             print(f"  Canvas current layer count: {len(layers) if layers else 0}")
         
-        # Check if profile curve is set and verify features near it have elevation data
+        # Always collect elevation data from the layer (even without profile curve)
+        # This helps set the correct elevation range
         try:
             from qgis.core import QgsFeatureRequest
-            # profileCurve might be a method, try calling it
+            
+            # First, try to get elevation from a sample of features (without profile curve filter)
+            # This gives us a baseline elevation range
+            print("  Collecting elevation data from layer features...")
+            sample_request = QgsFeatureRequest()
+            sample_request.setLimit(50)  # Sample first 50 features
+            
+            sample_elevation_values = []
+            sample_count = 0
+            for feature in reach_layer.getFeatures(sample_request):
+                sample_count += 1
+                # Check elevation fields
+                rp_from_level = feature.attribute('rp_from_level') if 'rp_from_level' in reach_layer.fields().names() else None
+                rp_to_level = feature.attribute('rp_to_level') if 'rp_to_level' in reach_layer.fields().names() else None
+                bottom_level = feature.attribute('bottom_level') if 'bottom_level' in reach_layer.fields().names() else None
+                
+                for level in [rp_from_level, rp_to_level, bottom_level]:
+                    if level is not None:
+                        try:
+                            level_float = float(level)
+                            if level_float != 0.0:  # Ignore zero values
+                                sample_elevation_values.append(level_float)
+                        except:
+                            pass
+                
+                if len(sample_elevation_values) >= 20:  # Collect enough values
+                    break
+            
+            if sample_elevation_values:
+                min_elev = min(sample_elevation_values)
+                max_elev = max(sample_elevation_values)
+                elev_range = max_elev - min_elev
+                # Add 20% padding
+                elevation_min = min_elev - elev_range * 0.2
+                elevation_max = max_elev + elev_range * 0.2
+                print(f"  ✓ Sample elevation range from {sample_count} features: {min_elev:.2f} - {max_elev:.2f}")
+                print(f"  ✓ Suggested elevation range with padding: {elevation_min:.2f} - {elevation_max:.2f}")
+                self._suggested_elevation_range = (elevation_min, elevation_max)
+                self._sample_elevation_values = sample_elevation_values
+            else:
+                print(f"  ⚠ No elevation values found in sampled features")
+            
+            # Now, if profile curve is set, refine the elevation range based on features near the curve
             if hasattr(self.canvas, 'profileCurve'):
                 curve = self.canvas.profileCurve() if callable(self.canvas.profileCurve) else self.canvas.profileCurve
                 if curve:
@@ -415,8 +499,8 @@ class TwwElevationProfileWidget(QWidget):
                         # Add 10% padding
                         elevation_min = min_z - z_range * 0.1
                         elevation_max = max_z + z_range * 0.1
-                        print(f"  Actual Z value range: {min_z:.2f} - {max_z:.2f}, suggested elevation range: {elevation_min:.2f} - {elevation_max:.2f}")
-                        # Store for later use in _setInitialVisibleRange
+                        print(f"  Actual Z value range near profile: {min_z:.2f} - {max_z:.2f}, suggested elevation range: {elevation_min:.2f} - {elevation_max:.2f}")
+                        # Update the suggested range with more accurate values from profile curve
                         self._suggested_elevation_range = (elevation_min, elevation_max)
                     else:
                         # If no valid Z values, try to get from elevation fields
@@ -446,7 +530,8 @@ class TwwElevationProfileWidget(QWidget):
                             # Add 10% padding
                             elevation_min = min_elev - elev_range * 0.1
                             elevation_max = max_elev + elev_range * 0.1
-                            print(f"  Elevation range from fields: {min_elev:.2f} - {max_elev:.2f}, suggested elevation range: {elevation_min:.2f} - {elevation_max:.2f}")
+                            print(f"  Elevation range from fields near profile: {min_elev:.2f} - {max_elev:.2f}, suggested elevation range: {elevation_min:.2f} - {elevation_max:.2f}")
+                            # Update the suggested range with more accurate values from profile curve
                             self._suggested_elevation_range = (elevation_min, elevation_max)
                         else:
                             print(f"  ⚠ Unable to get elevation values from fields, using default range")
@@ -467,6 +552,8 @@ class TwwElevationProfileWidget(QWidget):
         """
         from qgis.core import QgsGeometry, QgsLineString
         
+        print(f"✓ setProfileCurve: Called with geometry type: {type(geometry)}")
+        
         if isinstance(geometry, QgsGeometry) and not geometry.isEmpty():
             # Get the points from the geometry
             points = geometry.asPolyline()
@@ -477,11 +564,53 @@ class TwwElevationProfileWidget(QWidget):
                 
                 # Create a new QgsLineString with the points
                 curve = QgsLineString(points)
+                
+                # ALWAYS ensure data sources are set up before setting the curve
+                # This is critical because the canvas needs layers to display the profile
+                print(f"  Checking data sources setup status: _data_sources_setup = {getattr(self, '_data_sources_setup', 'NOT SET')}")
+                
+                # Verify layers are set on canvas FIRST
+                layers_configured = False
+                if hasattr(self.canvas, 'layers'):
+                    layers = self.canvas.layers()
+                    print(f"  Canvas currently has {len(layers) if layers else 0} layers configured")
+                    if layers and len(layers) > 0:
+                        layers_configured = True
+                        for layer in layers:
+                            print(f"    - Layer: {layer.name()} (ID: {layer.id()})")
+                
+                # If no layers or data sources not set up, set them up now
+                if not layers_configured or not getattr(self, '_data_sources_setup', False):
+                    print("  Setting up data sources (layers not configured or first time)...")
+                    self.setupDataSources()
+                    self._data_sources_setup = True
+                    print("  Data sources setup completed")
+                    
+                    # Verify again after setup
+                    if hasattr(self.canvas, 'layers'):
+                        layers = self.canvas.layers()
+                        print(f"  After setup: Canvas has {len(layers) if layers else 0} layers configured")
+                        if layers:
+                            for layer in layers:
+                                print(f"    - Layer: {layer.name()} (ID: {layer.id()})")
+                        else:
+                            print("  ⚠ WARNING: Canvas still has no layers after setup!")
+                else:
+                    print("  Data sources already set up, skipping...")
+                
+                # Set the profile curve
                 self.canvas.setProfileCurve(curve)
                 print(f"✓ Profile curve set to canvas")
                 
-                # Set up data sources (safe to call multiple times)
-                self.setupDataSources()
+                # Verify the curve was set
+                if hasattr(self.canvas, 'profileCurve'):
+                    curve_check = self.canvas.profileCurve() if callable(self.canvas.profileCurve) else self.canvas.profileCurve
+                    if curve_check:
+                        print(f"✓ Verified: Profile curve is set on canvas")
+                        # Check features near the profile curve
+                        self._checkFeaturesNearProfileCurve()
+                    else:
+                        print(f"⚠ Warning: Profile curve may not be set correctly")
                 
                 # Calculate and set visible plot range
                 self._setInitialVisibleRange()
@@ -489,10 +618,139 @@ class TwwElevationProfileWidget(QWidget):
                 # Force refresh after setting everything
                 self.canvas.refresh()
                 print(f"✓ Canvas refreshed (after setting profile curve)")
+                
+                # Try to trigger profile generation if method exists
+                if hasattr(self.canvas, 'generateProfile'):
+                    try:
+                        print("  Attempting to generate profile...")
+                        self.canvas.generateProfile()
+                        print("  ✓ Profile generation triggered")
+                    except Exception as e:
+                        print(f"  ⚠ generateProfile() failed: {e}")
+                
+                # Check canvas size (might be 0 if widget not shown yet)
+                canvas_size = self.canvas.size()
+                print(f"  Canvas size: {canvas_size.width()} x {canvas_size.height()}")
+                if canvas_size.width() == 0 or canvas_size.height() == 0:
+                    print("  ⚠ WARNING: Canvas size is 0! Widget may not be visible yet.")
+                    print("     Profile may not display until widget is shown.")
+                
+                # Additional verification
+                print("  Final verification:")
+                if hasattr(self.canvas, 'layers'):
+                    layers = self.canvas.layers()
+                    print(f"    - Canvas layers: {len(layers) if layers else 0}")
+                if hasattr(self.canvas, 'profileCurve'):
+                    curve_final = self.canvas.profileCurve() if callable(self.canvas.profileCurve) else self.canvas.profileCurve
+                    print(f"    - Profile curve set: {curve_final is not None}")
+                if hasattr(self.canvas, 'visiblePlotRange'):
+                    try:
+                        range_info = self.canvas.visiblePlotRange() if callable(self.canvas.visiblePlotRange) else self.canvas.visiblePlotRange
+                        print(f"    - Visible plot range: {range_info}")
+                    except:
+                        pass
+                
+                # Check if widget is visible
+                if hasattr(self, 'isVisible'):
+                    print(f"    - Widget visible: {self.isVisible()}")
+                if hasattr(self.canvas, 'isVisible'):
+                    print(f"    - Canvas visible: {self.canvas.isVisible()}")
             else:
                 print("✗ setProfileCurve: Geometry is empty (no points)")
         else:
-            print(f"✗ setProfileCurve: Invalid geometry object - {type(geometry)}")
+            print(f"✗ setProfileCurve: Invalid geometry object - {type(geometry)}, isEmpty: {geometry.isEmpty() if isinstance(geometry, QgsGeometry) else 'N/A'}")
+    
+    def _checkFeaturesNearProfileCurve(self):
+        """
+        Check if there are features with elevation data near the profile curve.
+        This helps diagnose why the profile might not be displaying.
+        """
+        from ..utils.twwlayermanager import TwwLayerManager
+        from qgis.core import QgsFeatureRequest, QgsWkbTypes
+        
+        reach_layer = TwwLayerManager.layer("vw_tww_reach")
+        if not reach_layer:
+            reach_layer = TwwLayerManager.layer("vw_network_segment")
+        
+        if not reach_layer:
+            print("  ⚠ Cannot check features: layer not found")
+            return
+        
+        try:
+            if hasattr(self.canvas, 'profileCurve'):
+                curve = self.canvas.profileCurve() if callable(self.canvas.profileCurve) else self.canvas.profileCurve
+                if not curve:
+                    print("  ⚠ Cannot check features: profile curve not set")
+                    return
+                
+                tolerance = self.canvas.tolerance() if hasattr(self.canvas, 'tolerance') else 10.0
+                bbox = curve.boundingBox().buffered(tolerance)
+                request = QgsFeatureRequest()
+                request.setFilterRect(bbox)
+                
+                print(f"  Checking features near profile curve (tolerance: {tolerance}m)...")
+                feature_count = 0
+                elevation_count = 0
+                elevation_values = []
+                
+                for feature in reach_layer.getFeatures(request):
+                    feature_count += 1
+                    
+                    # Check if feature has elevation
+                    geom = feature.geometry()
+                    has_3d_geom = geom and QgsWkbTypes.hasZ(geom.wkbType())
+                    
+                    # Check elevation fields
+                    rp_from_level = feature.attribute('rp_from_level') if 'rp_from_level' in reach_layer.fields().names() else None
+                    rp_to_level = feature.attribute('rp_to_level') if 'rp_to_level' in reach_layer.fields().names() else None
+                    bottom_level = feature.attribute('bottom_level') if 'bottom_level' in reach_layer.fields().names() else None
+                    
+                    if has_3d_geom or any([rp_from_level, rp_to_level, bottom_level]):
+                        elevation_count += 1
+                        
+                        # Collect elevation values
+                        if has_3d_geom:
+                            try:
+                                if geom.type() == QgsWkbTypes.LineGeometry:
+                                    from qgis.core import QgsPoint
+                                    polyline = geom.asPolyline()
+                                    z_vals = [p.z() for p in polyline if isinstance(p, QgsPoint) and p.is3D()]
+                                    if z_vals:
+                                        elevation_values.extend(z_vals)
+                            except:
+                                pass
+                        
+                        for level in [rp_from_level, rp_to_level, bottom_level]:
+                            if level is not None:
+                                try:
+                                    elevation_values.append(float(level))
+                                except:
+                                    pass
+                
+                print(f"    - Found {feature_count} features near profile curve")
+                print(f"    - {elevation_count} features have elevation data")
+                
+                if elevation_values:
+                    min_elev = min(elevation_values)
+                    max_elev = max(elevation_values)
+                    elev_range = max_elev - min_elev
+                    # Add 20% padding
+                    elevation_min = min_elev - elev_range * 0.2
+                    elevation_max = max_elev + elev_range * 0.2
+                    print(f"    - Elevation range near curve: {min_elev:.2f} - {max_elev:.2f}")
+                    print(f"    - Suggested range with padding: {elevation_min:.2f} - {elevation_max:.2f}")
+                    
+                    # Update the suggested elevation range with values from features near the curve
+                    # This is more accurate than the general layer sampling
+                    self._suggested_elevation_range = (elevation_min, elevation_max)
+                    print(f"    - ✓ Updated suggested elevation range based on features near curve")
+                else:
+                    print(f"    - ⚠ WARNING: No elevation values found near profile curve!")
+                    print(f"      This may be why the profile is not displaying.")
+        except Exception as e:
+            print(f"  ⚠ Error checking features near profile curve: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _setInitialVisibleRange(self):
         """
