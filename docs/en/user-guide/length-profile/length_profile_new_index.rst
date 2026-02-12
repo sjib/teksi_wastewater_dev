@@ -6,7 +6,27 @@ This represents a guide on how to choose a section and display a length profile.
 General
 -------
 
-TWW has a unique function to display length profiles. Choose the length profile button to start.
+TWW has a unique function to display length profiles. 
+
+The following elements are displayed:
+
+Wastewater_Structures such as Manholes, Special_structures etc. with
+Cover
+Bottom_Level
+
+
+Reaches with 
+From and to Reach_point
+
+TO DO: Add some screenshots to show details
+
+If a level is missing it is indicated with xxxx
+
+
+Length profile selection
+------------------------
+
+Choose the length profile button to start.
 
 .. figure:: images/profile_button_selected.jpg
 
