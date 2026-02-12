@@ -20,7 +20,7 @@ From and to Reach_point
 
 TO DO: Add some screenshots to show details
 
-If a level is missing it is indicated with xxxx
+If a level is missing it is indicated with xxxx (add description of icon)
 
 
 Length profile selection
@@ -53,6 +53,16 @@ If you hover over a manhole in the profile window you can see that the canvas co
 Same goes for the reaches.
 
 .. figure:: images/profile_connected_reach.jpg
+
+
+Length profile interpretation
+-----------------------------
+
+Then length profile indicates you very quickly if there are missing levels (NULL values) and helps you to see if you added the levels correctly.
+
+xxx Add detailed description how icons are set (to decide later if moved to another part of documentation (developers guide) or not. Start with general hints and then details.
+
+
 
 Printing
 ---------
