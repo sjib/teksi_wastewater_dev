@@ -46,6 +46,7 @@ You can repeat this several times. If there is no continuity you will get a warn
 In the profile window you now have the length profile. You can see detail info about manholes.
 
 NOT YET IMPLEMENTED: see https://github.com/sjib/teksi_wastewater_dev/issues/1#issuecomment-3889867186
+
 If you hover over a manhole in the profile window you can see that the canvas correspondent gets highlighted in green.
 
 .. figure:: images/profile_connected_manhole.jpg
@@ -67,4 +68,5 @@ xxx Add detailed description how icons are set (to decide later if moved to anot
 Printing
 ---------
 NOT YET IMPLEMENTED
+
 Select the **Print** button to send the profile to your selected printer. If you have installed a pdf printer you can save it as a pdf file.
