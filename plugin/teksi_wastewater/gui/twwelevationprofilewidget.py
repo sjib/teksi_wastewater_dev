@@ -26,7 +26,6 @@ from qgis.core import (
     Qgis,
     QgsFeature,
     QgsFeatureRequest,
-    QgsField,
     QgsFillSymbol,
     QgsGeometry,
     QgsLineString,
@@ -40,7 +39,7 @@ from qgis.core import (
     QgsVectorLayerElevationProperties,
     QgsWkbTypes,
 )
-from qgis.PyQt.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, QVariant
+from qgis.PyQt.QtCore import QPoint, QPointF, QRect, Qt, QTimer
 from qgis.PyQt.QtGui import QColor, QCursor, QPainter, QPen
 from qgis.PyQt.QtWidgets import QToolTip, QVBoxLayout, QWidget, QLabel
 from qgis.gui import QgsElevationProfileCanvas
@@ -225,8 +224,7 @@ class TwwElevationProfileWidget(QWidget):
         self._last_hover_pos = None
         self._last_hover_global_pos = None
         self._last_tooltip_text = None  # Track last tooltip text to avoid unnecessary updates
-        self._hover_debug = False  # Set to True to enable hover debugging
-        
+
         # Create custom persistent tooltip label (instead of using QToolTip)
         self._custom_tooltip = QLabel(None)
         self._custom_tooltip.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -286,9 +284,6 @@ class TwwElevationProfileWidget(QWidget):
         """
         if original_layer is None:
             return None
-        
-        print("  Creating temporary reach layer with Z values...")
-        
         # Get CRS from original layer
         crs = original_layer.crs()
         crs_string = crs.authid() if crs.isValid() else "EPSG:2056"
@@ -383,10 +378,6 @@ class TwwElevationProfileWidget(QWidget):
         
         provider.addFeatures(features)
         mem_layer.updateExtents()
-        
-        print(f"    ✓ Created {len(features)} features with Z values")
-        print(f"    ⚠ Skipped {skipped_no_level} (no level), {skipped_no_vertices} (no vertices)")
-        
         return mem_layer
 
     def setupDataSources(self):
@@ -400,14 +391,9 @@ class TwwElevationProfileWidget(QWidget):
         
         Reference: https://docs.qgis.org/3.40/en/docs/user_manual/map_views/elevation_profile.html
         """
-        print("=" * 60)
-        print("setupDataSources: Starting data source setup...")
-        
         # 1. CRITICAL: Set project first - this is required by QgsElevationProfileCanvas
         project = QgsProject.instance()
         self.canvas.setProject(project)
-        print("✓ Project set to canvas")
-        
         # 2. Define the layers to use (based on working configuration)
         # These are the layers that were tested and confirmed to work with "Absolute" setting
         # profile_type: 'surface' = Continuous Surface, 'features' = Individual Features
@@ -440,23 +426,14 @@ class TwwElevationProfileWidget(QWidget):
             # Fallback for potential naming differences in DB/views.
             if not layer and layer_name == 'vw_change_points':
                 layer = TwwLayerManager.layer('vm_change_points')
-                if layer:
-                    print("  ✓ Using fallback layer name: vm_change_points")
             if not layer:
-                print(f"  ⚠ Layer '{layer_name}' ({description}) not found, skipping")
                 continue
-            
-            print(f"  Found layer: {layer_name} ({description})")
-            
             # Special handling for vw_tww_reach: create temp layer with Z values
             # because the original geometry doesn't have proper Z values
             if layer_name == 'vw_tww_reach':
                 self._temp_reach_layer = self._createReachLayerWithZ(layer)
                 if self._temp_reach_layer:
                     layer = self._temp_reach_layer
-                    print(f"    ✓ Using temporary layer with Z values")
-                else:
-                    print(f"    ⚠ Failed to create temp layer, using original")
             
             # Store first valid CRS for canvas
             if first_valid_crs is None and layer.crs().isValid():
@@ -476,30 +453,19 @@ class TwwElevationProfileWidget(QWidget):
                     if hasattr(Qgis, 'VectorProfileType'):
                         if profile_type == 'surface':
                             elevation_props.setType(Qgis.VectorProfileType.ContinuousSurface)
-                            print(f"    ✓ Set profile type to Continuous Surface")
                         else:
                             elevation_props.setType(Qgis.VectorProfileType.IndividualFeatures)
-                            print(f"    ✓ Set profile type to Individual Features")
                     
                     # Set clamping to Absolute (use geometry Z values)
                     # This is the key setting that makes it work!
                     if hasattr(Qgis, 'AltitudeClamping'):
-                        # QGIS 3.26+
                         elevation_props.setClamping(Qgis.AltitudeClamping.Absolute)
-                        print(f"    ✓ Set clamping to Absolute (Qgis.AltitudeClamping)")
                     elif hasattr(elevation_props, 'setClamping'):
-                        # Try numeric value (0 = Absolute in some versions)
                         elevation_props.setClamping(0)
-                        print(f"    ✓ Set clamping to Absolute (numeric)")
                     
                     # Set binding to vertex (for line layers, use vertex Z values)
                     if hasattr(Qgis, 'AltitudeBinding'):
                         elevation_props.setBinding(Qgis.AltitudeBinding.Vertex)
-                        print(f"    ✓ Set binding to Vertex")
-                    
-                    # Check if geometry has Z values
-                    has_z = QgsWkbTypes.hasZ(layer.wkbType())
-                    print(f"    Geometry has Z: {has_z}")
                     
                     # 4. Configure profile symbols for better appearance
                     self._configureLayerSymbols(elevation_props, style, layer_name)
@@ -507,10 +473,10 @@ class TwwElevationProfileWidget(QWidget):
                     # Force layer to recognize changes
                     layer.triggerRepaint()
                     
-                except Exception as e:
-                    print(f"    ⚠ Failed to configure elevation properties: {e}")
+                except Exception:
+                    pass
             else:
-                print(f"    ⚠ Layer has no vector elevation properties")
+                pass
             
             layers_to_add.append(layer)
         
@@ -521,66 +487,18 @@ class TwwElevationProfileWidget(QWidget):
             print("=" * 60)
             return
         
-        # 4. Set CRS (use CRS from first valid layer)
         if first_valid_crs:
             self.canvas.setCrs(first_valid_crs)
-            print(f"✓ CRS set: {first_valid_crs.authid()}")
-        
-        # 5. Set all configured layers to the canvas
         self.canvas.setLayers(layers_to_add)
-        print(f"✓ {len(layers_to_add)} layers set to canvas:")
-        for layer in layers_to_add:
-            print(f"    - {layer.name()}")
-        
-        # 6. Set tolerance (distance from profile curve to include features)
-        self._manhole_dash_tolerance = 10.0
-        self.canvas.setTolerance(self._manhole_dash_tolerance)  # 10 meters
-        print(f"✓ Tolerance set: {self._manhole_dash_tolerance} meters")
-        
-        print("=" * 60)
-        print("setupDataSources: Complete!")
+        self.canvas.setTolerance(self._manhole_dash_tolerance)
 
     def _onJobCountChanged(self, count):
         """
         Called when profile generation jobs change.
         When count reaches 0, generation is complete and identify should work.
         """
-        if self._hover_debug:
-            print(f"[Profile] Active job count changed: {count}")
-        
         if count == 0 and not self._profile_generation_complete:
             self._profile_generation_complete = True
-            if self._hover_debug:
-                print(f"[Profile] ✓ Generation complete! identify() should now work.")
-                print(f"[Profile] Waiting 500ms for rendering to stabilize...")
-            
-            # Wait a bit for rendering to complete, then test identify
-            QTimer.singleShot(500, self._testIdentifyAfterGeneration)
-    
-    def _testIdentifyAfterGeneration(self):
-        """Test if identify works after profile generation completes"""
-        if not self._hover_debug:
-            return
-        
-        try:
-            # Get visible range center point
-            visible_dist = self.canvas.visibleDistanceRange()
-            visible_elev = self.canvas.visibleElevationRange()
-            center_x = (visible_dist.lower() + visible_dist.upper()) / 2.0
-            center_y = (visible_elev.lower() + visible_elev.upper()) / 2.0
-            
-            test_point = QPointF(center_x, center_y)
-            test_results = self.canvas.identify(test_point)
-            
-            print(f"[Profile] Test identify at center ({center_x:.1f}, {center_y:.1f}): {len(test_results)} results")
-            
-            if len(test_results) == 0:
-                print(f"[Profile] ⚠ identify() still returns 0 even after generation complete!")
-                print(f"[Profile] ⚠ This may be a QGIS version issue or API limitation.")
-            else:
-                print(f"[Profile] ✓ identify() is working!")
-        except Exception as e:
-            print(f"[Profile] Test identify failed: {e}")
     
     def _setupHoverHandling(self):
         """
@@ -596,50 +514,15 @@ class TwwElevationProfileWidget(QWidget):
         # Enable official snapping feature (QGIS 3.26+)
         if hasattr(self.canvas, "setSnappingEnabled"):
             self.canvas.setSnappingEnabled(True)
-            if self._hover_debug:
-                print("✓ Canvas snapping enabled")
-        
-        # Connect to official hover signal (QGIS 3.26+)
-        # Note: This signal may not trigger reliably in all QGIS versions/situations,
-        # so we also use mouseMoveEvent as a fallback
         if hasattr(self.canvas, "canvasPointHovered"):
             self.canvas.canvasPointHovered.connect(self._onCanvasPointHovered)
-            if self._hover_debug:
-                print("✓ canvasPointHovered signal connected")
-        
-        # Print layer information if debug enabled
-        if self._hover_debug:
-            self._printLayerDiagnostics()
     
-    def _printLayerDiagnostics(self):
-        """Print diagnostic information about layers (debug only)"""
-        try:
-            layers = self.canvas.layers() if hasattr(self.canvas, 'layers') else []
-            print(f"\n=== Layer Diagnostics ===")
-            print(f"Total layers: {len(layers)}")
-            for i, layer in enumerate(layers):
-                if hasattr(layer, 'name') and hasattr(layer, 'featureCount'):
-                    feature_count = layer.featureCount()
-                    print(f"  {i+1}. {layer.name()}: {feature_count} features")
-                    
-                    # Check elevation properties
-                    if hasattr(layer, 'elevationProperties'):
-                        elev_props = layer.elevationProperties()
-                        if hasattr(elev_props, 'isEnabled'):
-                            enabled = elev_props.isEnabled() if callable(elev_props.isEnabled) else elev_props.isEnabled
-                            print(f"     Elevation enabled: {enabled}")
-            print(f"=========================\n")
-        except Exception as e:
-            print(f"Layer diagnostics failed: {e}")
-
     def _onCanvasPointHovered(self, _map_point, profile_point):
         """
         Handle hover signal from QgsElevationProfileCanvas (official API).
         
         This is the preferred method but may not trigger in all QGIS versions.
         """
-        if self._hover_debug:
-            print(f"[Signal] canvasPointHovered triggered: profile_point={profile_point}")
         if not self._hover_enabled:
             return
         self._updateHoverMatch(profile_point)
@@ -692,8 +575,6 @@ class TwwElevationProfileWidget(QWidget):
         """
         plot_point = self._profilePointToPlotPoint(profile_point)
         if plot_point is None:
-            if self._hover_debug:
-                print(f"[Hover] Cannot process: plot_point=None")
             self._clearHoverState()
             return
 
@@ -705,21 +586,13 @@ class TwwElevationProfileWidget(QWidget):
                 # Use canvas coordinates (mouse position), not plot coordinates
                 canvas_point = QPointF(self._last_hover_pos)
                 identify_results = self.canvas.identify(canvas_point)
-                if self._hover_debug:
-                    print(f"[Hover] identify(canvas_pos=({canvas_point.x():.0f}, {canvas_point.y():.0f})) returned {len(identify_results)} results")
-            except Exception as e:
-                if self._hover_debug:
-                    print(f"[Hover] identify() failed: {e}")
-        
-        if self._hover_debug:
-            print(f"[Hover] plot_point=({plot_point.x():.2f}, {plot_point.y():.2f}), identify_results count={len(identify_results)}")
+            except Exception:
+                pass
         
         # Check for custom-drawn manhole dashes (not in layers, drawn via drawForeground)
         manhole_match = self._identifyManholeDash(plot_point)
         if manhole_match:
             identify_results.append(manhole_match)
-            if self._hover_debug:
-                print(f"[Hover] ✓ Found manhole dash match")
         
         # Find the nearest match to the cursor position
         nearest = self._nearestIdentifyResult(identify_results, plot_point)
@@ -728,17 +601,6 @@ class TwwElevationProfileWidget(QWidget):
         # This prevents tooltip from disappearing when mouse moves slightly
         if nearest:
             self._last_hover_match = nearest
-            if self._hover_debug:
-                layer = nearest.get('layer')
-                layer_name = layer.name() if layer and hasattr(layer, 'name') else 'None'
-                print(f"[Hover] ✓ Found match: layer={layer_name}")
-        else:
-            # No new match found - keep showing the last match (if any)
-            if self._hover_debug:
-                if self._last_hover_match:
-                    print(f"[Hover] No new match, keeping last match")
-                else:
-                    print(f"[Hover] ✗ No match found")
         
         # Show tooltip with current or last match
         self._showHoverTooltip(plot_point, self._last_hover_match)
@@ -959,34 +821,22 @@ class TwwElevationProfileWidget(QWidget):
         # Case 1: No previous tooltip or feature changed
         if not hasattr(self, '_last_tooltip_text') or not self._last_tooltip_text:
             need_update = True
-            if self._hover_debug:
-                print(f"[Tooltip] First show or text was None")
         elif not same_feature:
             need_update = True
-            if self._hover_debug:
-                print(f"[Tooltip] Feature changed, updating")
         # Case 2: Text content changed (data updated)
         elif text != self._last_tooltip_text:
             need_update = True
-            if self._hover_debug:
-                print(f"[Tooltip] Text changed, updating")
         # Case 3: Mouse moved significantly (optional, for tooltip position update)
         elif self._last_hover_global_pos:
             dx = abs(current_pos.x() - self._last_hover_global_pos.x())
             dy = abs(current_pos.y() - self._last_hover_global_pos.y())
             if dx > 50 or dy > 50:  # Only update position if moved > 50 pixels
                 need_update = True
-                if self._hover_debug:
-                    print(f"[Tooltip] Mouse moved significantly ({dx}, {dy}), updating position")
         
         # Only update tooltip when needed
         if need_update:
             self._last_hover_global_pos = current_pos
             self._last_tooltip_text = text
-            
-            if self._hover_debug:
-                print(f"[Tooltip] Updating custom tooltip at pos=({current_pos.x()}, {current_pos.y()})")
-            
             # Use custom persistent tooltip instead of QToolTip
             # This avoids Qt's automatic timeout behavior
             if hasattr(self, '_custom_tooltip'):
@@ -997,16 +847,8 @@ class TwwElevationProfileWidget(QWidget):
                 self._custom_tooltip.move(tooltip_pos)
                 self._custom_tooltip.show()
                 self._custom_tooltip.raise_()
-                if self._hover_debug:
-                    print(f"[Tooltip] ✓ Custom tooltip shown")
             else:
-                # Fallback to QToolTip if custom tooltip not available
                 QToolTip.showText(current_pos, text, self.canvas, QRect(), 120000)
-                if self._hover_debug:
-                    print(f"[Tooltip] ✓ QToolTip shown (fallback)")
-        else:
-            if self._hover_debug:
-                print(f"[Tooltip] Skipped update - no change needed")
 
     def _formatHoverSummary(self, plot_point, match):
         """
@@ -1015,22 +857,18 @@ class TwwElevationProfileWidget(QWidget):
         result = match.get("result") if match else None
         layer = match.get("layer") if match else None
         layer_name = layer.name() if layer and hasattr(layer, "name") else ""
-        
-        if self._hover_debug:
-            print(f"[Format Debug] layer_name='{layer_name}'")
-        
         # Extract feature first, as it contains the complete attributes
         feature = self._extractResultFeature(result, layer)
-        
+        result_attrs = self._extractResultAttributes(result)
+
         # Priority 1: Get attributes from feature (contains full business attributes)
         if feature:
             attrs = self._featureAttributes(feature)
         else:
             # Priority 2: Fallback to result attributes (only profile attributes)
-            attrs = self._extractResultAttributes(result)
-        
+            attrs = result_attrs
+
         # Merge profile-specific attributes from result (distance, elevation, etc.)
-        result_attrs = self._extractResultAttributes(result)
         if result_attrs:
             for key in ['distance', 'elevation', 'delta']:
                 if key in result_attrs and key not in attrs:
@@ -1042,13 +880,6 @@ class TwwElevationProfileWidget(QWidget):
         is_reach = self._isReachHover(layer_name, attrs)
         is_cover = self._isCoverHover(layer_name, attrs)
         is_manhole = self._isManholeHover(layer_name, attrs)
-        
-        if self._hover_debug:
-            print(f"[Format Debug] is_reach={is_reach}, is_cover={is_cover}, is_manhole={is_manhole}")
-            if not is_reach and not is_cover and not is_manhole:
-                print(f"[Format Debug] ⚠ Not identified as reach, cover or manhole! layer='{layer_name}'")
-                print(f"[Format Debug] Available attrs keys: {list(attrs.keys())[:10] if attrs else 'None'}")
-        
         if is_reach:
             obj_id = self._pickAttr(attrs, ["obj_id", "objId", "id", "reach_id"])
             title = f"Reach {obj_id}" if obj_id else "Reach"
@@ -1107,9 +938,6 @@ class TwwElevationProfileWidget(QWidget):
             brand = cover_data.get("brand") or self._pickAttr(attrs, ["brand"])
             self._appendLabeled(lines, "Brand", brand)
         elif is_manhole:
-            if self._hover_debug:
-                print(f"[Manhole Debug] Detected manhole hover: layer={layer_name}")
-            
             node_type = str(self._pickAttr(attrs, ["node_type", "nodeType", "type"]) or "").lower()
             is_actual_manhole = "manhole" in node_type
             obj_id = self._pickAttr(attrs, ["obj_id", "objId", "id", "ws_obj_id"])
@@ -1118,10 +946,6 @@ class TwwElevationProfileWidget(QWidget):
                 # Full manhole display with all details
                 title = f"Manhole: {obj_id}" if obj_id else "Manhole"
                 lines.append(title)
-                
-                if self._hover_debug:
-                    print(f"[Manhole Debug] obj_id={obj_id}, node_type={node_type}")
-                
                 # Get enhanced manhole data from related tables
                 manhole_data = self._getManholeEnhancedData(obj_id, attrs, feature)
                 
@@ -1393,9 +1217,6 @@ class TwwElevationProfileWidget(QWidget):
                 result["material"] = self._pickAttr(feat_attrs, ["material"])
                 result["cover_shape"] = self._pickAttr(feat_attrs, ["cover_shape"])
                 result["brand"] = self._pickAttr(feat_attrs, ["brand"])
-                
-                if self._hover_debug:
-                    print(f"[Cover Debug] Found cover {obj_id}: level={result['level']}, material={result['material']}, shape={result['cover_shape']}, brand={result['brand']}")
                 break
         
         return result
@@ -1410,10 +1231,6 @@ class TwwElevationProfileWidget(QWidget):
         - Width (if available)
         """
         result = {}
-        
-        if self._hover_debug:
-            print(f"[Manhole Debug] Getting enhanced data for obj_id={obj_id}")
-        
         # Get wastewater structure ID for querying related tables
         ws_id = self._pickAttr(attrs, [
             "fk_wastewater_structure",
@@ -1424,20 +1241,11 @@ class TwwElevationProfileWidget(QWidget):
         ])
         if not ws_id:
             ws_id = obj_id
-        
-        if self._hover_debug:
-            print(f"[Manhole Debug] ws_id={ws_id}")
-        
         # Query tww_wastewater_structure for _input_label and _output_label
         # These fields already contain the correct entry/exit levels
         ws_layer = TwwLayerManager.layer("vw_tww_wastewater_structure")
         if ws_layer is None:
             ws_layer = TwwLayerManager.layer("tww_wastewater_structure")
-        
-        if self._hover_debug:
-            ws_layer_name = ws_layer.name() if ws_layer else "None"
-            print(f"[Manhole Debug] wastewater_structure layer: {ws_layer_name}")
-        
         if ws_layer and ws_id:
             found_ws = False
             for ws_feat in ws_layer.getFeatures():
@@ -1453,21 +1261,12 @@ class TwwElevationProfileWidget(QWidget):
                         self._pickAttr(ws_attrs, ["_output_label", "output_label", "exit_level"])
                     )
                     found_ws = True
-                    if self._hover_debug:
-                        print(f"[Manhole Debug] Found WS: entry={result.get('entry_level')}, exit={result.get('exit_level')}")
                     break
-            if self._hover_debug and not found_ws:
-                print(f"[Manhole Debug] ⚠ No matching wastewater_structure found for ws_id={ws_id}")
         
         # 1. Query cover level from vm_cover or vw_cover
         cover_layer = TwwLayerManager.layer("vm_cover")
         if cover_layer is None:
             cover_layer = TwwLayerManager.layer("vw_cover")
-        
-        if self._hover_debug:
-            cover_layer_name = cover_layer.name() if cover_layer else "None"
-            print(f"[Manhole Debug] cover layer: {cover_layer_name}")
-        
         if cover_layer and ws_id:
             found_cover = False
             for cover_feat in cover_layer.getFeatures():
@@ -1484,28 +1283,16 @@ class TwwElevationProfileWidget(QWidget):
                         self._pickAttr(cover_attrs, ["level", "cover_level", "coverLevel", "elevation"])
                     )
                     found_cover = True
-                    if self._hover_debug:
-                        print(f"[Manhole Debug] Found cover: level={result.get('cover_level')}")
                     break
-            if self._hover_debug and not found_cover:
-                print(f"[Manhole Debug] ⚠ No matching cover found for ws_id={ws_id}")
         
         # Fallback: try to get cover_level from current attrs
         if "cover_level" not in result or result["cover_level"] is None:
             result["cover_level"] = self._toFloat(
                 self._pickAttr(attrs, ["cover_level", "coverLevel"])
             )
-            if self._hover_debug and result.get("cover_level"):
-                print(f"[Manhole Debug] Using cover_level from current attrs: {result['cover_level']}")
-        
         # 2. Query bottom level from vm_wastewater_node or vw_wastewater_node
         # Note: field name is "botoom_level" (typo in DB)
         node_layer = TwwLayerManager.layer("vw_wastewater_node")
-        
-        if self._hover_debug:
-            node_layer_name = node_layer.name() if node_layer else "None"
-            print(f"[Manhole Debug] node layer: {node_layer_name}")
-        
         if node_layer and obj_id:
             found_node = False
             for node_feat in node_layer.getFeatures():
@@ -1521,23 +1308,13 @@ class TwwElevationProfileWidget(QWidget):
                         self._pickAttr(node_attrs, ["dimension1", "width", "diameter"])
                     )
                     found_node = True
-                    if self._hover_debug:
-                        print(f"[Manhole Debug] Found node: bottom={result.get('bottom_level')}, width={result.get('width')}")
                     break
-            if self._hover_debug and not found_node:
-                print(f"[Manhole Debug] ⚠ No matching node found for obj_id={obj_id}")
         
         # Fallback: try to get bottom_level from current attrs
         if "bottom_level" not in result or result["bottom_level"] is None:
             result["bottom_level"] = self._toFloat(
                 self._pickAttr(attrs, ["botoom_level", "bottom_level", "bottomLevel", "invert_level"])
             )
-            if self._hover_debug and result.get("bottom_level"):
-                print(f"[Manhole Debug] Using bottom_level from current attrs: {result['bottom_level']}")
-        
-        if self._hover_debug:
-            print(f"[Manhole Debug] Final result: {result}")
-        
         return result
     
     def _isManholeHover(self, layer_name, attrs):
@@ -1581,22 +1358,6 @@ class TwwElevationProfileWidget(QWidget):
         
         return False
 
-    def _isHoverCloseToPoint(self, plot_point):
-        if self._last_hover_pos is None:
-            return False
-        if not hasattr(self.canvas, "plotPointToCanvasPoint"):
-            return True
-        try:
-            canvas_point = self.canvas._plotPointToCanvasPoint(plot_point)
-            if canvas_point is None:
-                return True
-            dx = self._last_hover_pos.x() - canvas_point.x()
-            dy = self._last_hover_pos.y() - canvas_point.y()
-            return (dx * dx + dy * dy) <= (self._hover_snap_px * self._hover_snap_px)
-        except Exception:
-            return True
-    
-    
     def _configureLayerSymbols(self, elevation_props, style, layer_name):
         """
         Configure profile symbols for a layer to improve visual appearance.
@@ -1642,8 +1403,6 @@ class TwwElevationProfileWidget(QWidget):
                     bottom_layer.setPenCapStyle(Qt.FlatCap)
                     bottom_layer.setPenJoinStyle(Qt.RoundJoin)
                     line_symbol.appendSymbolLayer(bottom_layer)
-                    
-                    print(f"    ✓ Hollow line symbol set: outer={style['line']}, inner={style.get('line_inner', '#FFFFFF')}")
                 else:
                     # Standard solid line
                     line_symbol = QgsLineSymbol.createSimple({
@@ -1652,8 +1411,6 @@ class TwwElevationProfileWidget(QWidget):
                         'capstyle': 'round',
                         'joinstyle': 'round'
                     })
-                    print(f"    ✓ Line symbol set: {style['line']}, width={style['line_width']}")
-                
                 elevation_props.setProfileLineSymbol(line_symbol)
             
             # Create and set fill symbol (for areas under the profile line)
@@ -1664,7 +1421,6 @@ class TwwElevationProfileWidget(QWidget):
                     'outline_width': '0.5'
                 })
                 elevation_props.setProfileFillSymbol(fill_symbol)
-                print(f"    ✓ Fill symbol set: {style['fill']}")
             
             # Create and set marker symbol (for points/vertices)
             if hasattr(elevation_props, 'setProfileMarkerSymbol'):
@@ -1676,7 +1432,6 @@ class TwwElevationProfileWidget(QWidget):
                     'name': style.get('marker_name', 'circle')
                 })
                 elevation_props.setProfileMarkerSymbol(marker_symbol)
-                print(f"    ✓ Marker symbol set: {style['marker']}, size={style['marker_size']}")
                 # Ensure markers are actually drawn if the API supports it.
                 if hasattr(elevation_props, 'setShowMarkers'):
                     elevation_props.setShowMarkers(True)
@@ -1689,10 +1444,8 @@ class TwwElevationProfileWidget(QWidget):
             # Set to False to use our custom profile symbols instead
             if hasattr(elevation_props, 'setRespectLayerSymbology'):
                 elevation_props.setRespectLayerSymbology(False)
-                print(f"    ✓ Using custom profile symbols")
-                
-        except Exception as e:
-            print(f"    ⚠ Failed to configure symbols for {layer_name}: {e}")
+        except Exception:
+            pass
 
     def setProfileCurve(self, geometry):
         """
@@ -1701,16 +1454,10 @@ class TwwElevationProfileWidget(QWidget):
         :param geometry: QgsGeometry object representing the path
         """
         if not isinstance(geometry, QgsGeometry) or geometry.isEmpty():
-            print(f"✗ setProfileCurve: Invalid or empty geometry")
             return
-        
-        # Get the points from the geometry
         points = geometry.asPolyline()
         if not points:
-            print("✗ setProfileCurve: Geometry has no points")
             return
-        
-        print(f"✓ setProfileCurve: Received geometry with {len(points)} points")
         
         # Create a new QgsLineString with the points
         curve = QgsLineString(points)
@@ -1723,28 +1470,16 @@ class TwwElevationProfileWidget(QWidget):
             layers_configured = layers and len(layers) > 0
         
         if not layers_configured or not getattr(self, '_data_sources_setup', False):
-            print("  Setting up data sources...")
             self.setupDataSources()
             self._data_sources_setup = True
         
         # Cancel any running jobs before setting new curve
         if hasattr(self.canvas, 'cancelJobs'):
             self.canvas.cancelJobs()
-            print("✓ Previous jobs cancelled")
-        
-        # Invalidate current plot extent before setting new curve
-        # This forces the canvas to recalculate everything
         if hasattr(self.canvas, 'invalidateCurrentPlotExtent'):
             self.canvas.invalidateCurrentPlotExtent()
-            print("✓ Plot extent invalidated")
-        
-        # Set the profile curve
         self.canvas.setProfileCurve(curve)
-        print(f"✓ Profile curve set to canvas")
-        
-        # Force refresh to generate the profile
         self.canvas.refresh()
-        print(f"✓ Canvas refreshed")
 
         # Cache profile geometry for manhole dashes rendering
         self._profile_curve_geom = geometry
@@ -1755,9 +1490,8 @@ class TwwElevationProfileWidget(QWidget):
             if hasattr(self.canvas, 'zoomFull'):
                 try:
                     self.canvas.zoomFull()
-                    print(f"✓ zoomFull() called (delayed)")
-                except Exception as e:
-                    print(f"  ⚠ zoomFull() failed: {e}")
+                except Exception:
+                    pass
         
         # Delay zoomFull by 100ms to allow canvas to process
         QTimer.singleShot(100, delayedZoomFull)
