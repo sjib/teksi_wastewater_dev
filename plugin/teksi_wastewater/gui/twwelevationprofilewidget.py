@@ -38,6 +38,7 @@ from qgis.core import (
     QgsVectorLayer,
     QgsVectorLayerElevationProperties,
     QgsWkbTypes,
+    QgsDoubleRange,
 )
 from qgis.PyQt.QtCore import QPoint, QPointF, QRect, Qt, QTimer
 from qgis.PyQt.QtGui import QColor, QCursor, QPainter, QPen
@@ -254,24 +255,10 @@ class TwwElevationProfileWidget(QWidget):
         self._current_highlight = None
         self._current_highlight_key = None
         self._setupHoverHandling()
-
-        # Clean up highlight when project is closed/cleared
-        QgsProject.instance().cleared.connect(self._clearHighlight)
         
         # Monitor profile generation completion
         if hasattr(self.canvas, 'activeJobCountChanged'):
             self.canvas.activeJobCountChanged.connect(self._onJobCountChanged)
-    
-    def cleanup(self):
-        """
-        Clean up resources. Must be called before the widget is destroyed
-        to ensure QgsHighlight is removed from the map canvas.
-        """
-        self._clearHighlight()
-        try:
-            QgsProject.instance().cleared.disconnect(self._clearHighlight)
-        except Exception:
-            pass
 
     def changeVerticalExaggeration(self, val):
         """
@@ -1524,11 +1511,37 @@ class TwwElevationProfileWidget(QWidget):
             if hasattr(self.canvas, 'zoomFull'):
                 try:
                     self.canvas.zoomFull()
+                    
+                    # Add 10% margin to avoid "top-out" look
+                    if hasattr(self.canvas, 'visibleDistanceRange') and \
+                       hasattr(self.canvas, 'visibleElevationRange') and \
+                       hasattr(self.canvas, 'setVisiblePlotRange'):
+                        
+                        dist_range = self.canvas.visibleDistanceRange()
+                        elev_range = self.canvas.visibleElevationRange()
+                        
+                        # Add 5% margin on each side (total 10% expansion)
+                        dist_len = dist_range.upper() - dist_range.lower()
+                        elev_len = elev_range.upper() - elev_range.lower()
+                        
+                        margin_dist = max(dist_len * 0.05, 1.0) # Min 1m margin
+                        margin_elev = max(elev_len * 0.05, 0.5) # Min 0.5m margin
+                        
+                        # New bounds
+                        d_min = dist_range.lower() - margin_dist
+                        d_max = dist_range.upper() + margin_dist
+                        e_min = elev_range.lower() - margin_elev
+                        e_max = elev_range.upper() + margin_elev
+                        
+                        # Try passing 4 floats (common in older/alternative bindings)
+                        self.canvas.setVisiblePlotRange(d_min, d_max, e_min, e_max)
+                        self.canvas.refresh()
                 except Exception:
+                    # Fail silently to prevent crashing
                     pass
         
-        # Delay zoomFull by 100ms to allow canvas to process
-        QTimer.singleShot(100, delayedZoomFull)
+        # Delay zoomFull by 0ms to allow canvas to process (next event loop)
+        QTimer.singleShot(0, delayedZoomFull)
     
 
     def setProfileFromTree(self, nodes, edges):
@@ -1871,10 +1884,6 @@ class TwwElevationProfileWidget(QWidget):
         """Remove the current map canvas highlight."""
         if self._current_highlight is not None:
             self._current_highlight.hide()
-            # Must remove from canvas scene — del only drops the Python reference,
-            # but the C++ QGraphicsScene still owns the item and keeps rendering it.
-            if self._map_canvas and self._map_canvas.scene():
-                self._map_canvas.scene().removeItem(self._current_highlight)
             del self._current_highlight
             self._current_highlight = None
         self._current_highlight_key = None
