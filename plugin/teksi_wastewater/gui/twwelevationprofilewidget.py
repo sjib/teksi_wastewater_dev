@@ -42,7 +42,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QPoint, QPointF, QRect, Qt, QTimer
 from qgis.PyQt.QtGui import QColor, QCursor, QPainter, QPen
 from qgis.PyQt.QtWidgets import QToolTip, QVBoxLayout, QWidget, QLabel
-from qgis.gui import QgsElevationProfileCanvas
+from qgis.gui import QgsElevationProfileCanvas, QgsHighlight
 
 from ..tools.twwnetwork import TwwGraphManager
 from ..utils.twwlayermanager import TwwLayerManager
@@ -185,7 +185,11 @@ class TwwElevationProfileWidget(QWidget):
     
     This widget replaces the old TwwPlotSVGWidget which used QtWebKit.
     """
-    
+
+    # Highlight color for hover feedback on the main map canvas
+    HIGHLIGHT_COLOR = QColor("#2ECC71")  # Emerald green
+    HIGHLIGHT_FILL_COLOR = QColor(46, 204, 113, 60)  # Semi-transparent fill
+
     def __init__(self, parent, network_analyzer: TwwGraphManager = None):
         """
         Initialize the elevation profile widget.
@@ -240,6 +244,15 @@ class TwwElevationProfileWidget(QWidget):
         """)
         self._custom_tooltip.hide()
         self._profile_generation_complete = False
+
+        # Map canvas highlight for hover feedback
+        try:
+            from qgis.utils import iface as _iface
+            self._map_canvas = _iface.mapCanvas() if _iface else None
+        except Exception:
+            self._map_canvas = None
+        self._current_highlight = None
+        self._current_highlight_key = None
         self._setupHoverHandling()
         
         # Monitor profile generation completion
@@ -605,6 +618,12 @@ class TwwElevationProfileWidget(QWidget):
         # Show tooltip with current or last match
         self._showHoverTooltip(plot_point, self._last_hover_match)
 
+        # Highlight the hovered feature on the main map canvas
+        if self._last_hover_match:
+            self._highlightMatchOnMap(plot_point, self._last_hover_match)
+        else:
+            self._clearHighlight()
+
     def _identifyManholeDash(self, plot_point):
         """
         Identify custom-drawn manhole dashes (drawn via drawForeground, not in layers).
@@ -776,6 +795,7 @@ class TwwElevationProfileWidget(QWidget):
         QToolTip.hideText()
         if hasattr(self, '_custom_tooltip'):
             self._custom_tooltip.hide()
+        self._clearHighlight()
 
     def _showHoverTooltip(self, plot_point, match):
         # Check if we should hide the tooltip
@@ -1714,3 +1734,129 @@ class TwwElevationProfileWidget(QWidget):
         # Scale to pixel width: 1000mm -> 10px, range: 6px to 16px
         width = diameter_mm / 100.0
         return max(6.0, min(16.0, float(width)))
+
+    def _highlightMatchOnMap(self, plot_point, match):
+        """
+        Highlight the hovered feature on the QGIS main map canvas.
+
+        - Reach → highlight on vw_tww_reach by obj_id
+        - Cover → highlight on vm_cover by obj_id
+        - Manhole → highlight associated cover on vm_cover via fk_wastewater_structure
+        """
+        if self._map_canvas is None:
+            return
+
+        result = match.get("result") if match else None
+        layer = match.get("layer") if match else None
+        layer_name = layer.name() if layer and hasattr(layer, "name") else ""
+        feature = self._extractResultFeature(result, layer)
+        result_attrs = self._extractResultAttributes(result)
+
+        attrs = self._featureAttributes(feature) if feature else result_attrs
+        if result_attrs:
+            for key in result_attrs:
+                if key not in attrs:
+                    attrs[key] = result_attrs[key]
+
+        is_reach = self._isReachHover(layer_name, attrs)
+        is_cover = self._isCoverHover(layer_name, attrs)
+        is_manhole = self._isManholeHover(layer_name, attrs)
+        obj_id = self._pickAttr(attrs, ["obj_id", "objId", "id"])
+
+        if not obj_id and not is_manhole:
+            self._clearHighlight()
+            return
+
+        if is_reach:
+            highlight_key = f"reach:{obj_id}"
+            if highlight_key == self._current_highlight_key:
+                return
+            self._doHighlightFeature(
+                "vw_tww_reach", f'"obj_id" = \'{obj_id}\'', highlight_key
+            )
+        elif is_cover:
+            highlight_key = f"cover:{obj_id}"
+            if highlight_key == self._current_highlight_key:
+                return
+            self._doHighlightFeature(
+                "vm_cover", f'"obj_id" = \'{obj_id}\'', highlight_key, "vw_cover"
+            )
+        elif is_manhole:
+            # Find associated cover via fk_wastewater_structure
+            ws_id = self._pickAttr(attrs, [
+                "fk_wastewater_structure", "fk_wastewater_structure_obj_id", "ws_obj_id"
+            ])
+            if not ws_id and obj_id:
+                # Look up node to get fk_wastewater_structure
+                node_layer = TwwLayerManager.layer("vw_wastewater_node")
+                if node_layer:
+                    req = QgsFeatureRequest().setFilterExpression(
+                        f'"obj_id" = \'{obj_id}\''
+                    )
+                    req.setLimit(1)
+                    for nf in node_layer.getFeatures(req):
+                        na = self._featureAttributes(nf)
+                        ws_id = self._pickAttr(na, [
+                            "fk_wastewater_structure", "ws_obj_id"
+                        ])
+                        break
+            if ws_id:
+                highlight_key = f"manhole:{ws_id}"
+                if highlight_key == self._current_highlight_key:
+                    return
+                self._doHighlightFeature(
+                    "vm_cover",
+                    f'"fk_wastewater_structure" = \'{ws_id}\'',
+                    highlight_key,
+                    "vw_cover",
+                )
+            else:
+                self._clearHighlight()
+        else:
+            self._clearHighlight()
+
+    def _doHighlightFeature(self, layer_name, filter_expr, highlight_key, fallback_layer=None):
+        """
+        Create a QgsHighlight on the map canvas for the first matching feature.
+
+        :param layer_name: Name of the layer to query
+        :param filter_expr: QgsFeatureRequest filter expression
+        :param highlight_key: Unique key to prevent duplicate highlights
+        :param fallback_layer: Fallback layer name if primary is not found
+        """
+        map_layer = TwwLayerManager.layer(layer_name)
+        if map_layer is None and fallback_layer:
+            map_layer = TwwLayerManager.layer(fallback_layer)
+        if map_layer is None:
+            self._clearHighlight()
+            return
+
+        request = QgsFeatureRequest().setFilterExpression(filter_expr)
+        request.setLimit(1)
+
+        feat = None
+        for f in map_layer.getFeatures(request):
+            feat = f
+            break
+
+        if feat is None or feat.geometry() is None or feat.geometry().isEmpty():
+            self._clearHighlight()
+            return
+
+        self._clearHighlight()
+        self._current_highlight = QgsHighlight(self._map_canvas, feat.geometry(), map_layer)
+        self._current_highlight.setColor(self.HIGHLIGHT_COLOR)
+        self._current_highlight.setFillColor(self.HIGHLIGHT_FILL_COLOR)
+        self._current_highlight.setBuffer(0.5)
+        self._current_highlight.setMinWidth(2)
+        self._current_highlight.setWidth(4)
+        self._current_highlight.show()
+        self._current_highlight_key = highlight_key
+
+    def _clearHighlight(self):
+        """Remove the current map canvas highlight."""
+        if self._current_highlight is not None:
+            self._current_highlight.hide()
+            del self._current_highlight
+            self._current_highlight = None
+        self._current_highlight_key = None
