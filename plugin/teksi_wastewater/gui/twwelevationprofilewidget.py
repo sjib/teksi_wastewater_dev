@@ -254,11 +254,25 @@ class TwwElevationProfileWidget(QWidget):
         self._current_highlight = None
         self._current_highlight_key = None
         self._setupHoverHandling()
+
+        # Clean up highlight when project is closed/cleared
+        QgsProject.instance().cleared.connect(self._clearHighlight)
         
         # Monitor profile generation completion
         if hasattr(self.canvas, 'activeJobCountChanged'):
             self.canvas.activeJobCountChanged.connect(self._onJobCountChanged)
     
+    def cleanup(self):
+        """
+        Clean up resources. Must be called before the widget is destroyed
+        to ensure QgsHighlight is removed from the map canvas.
+        """
+        self._clearHighlight()
+        try:
+            QgsProject.instance().cleared.disconnect(self._clearHighlight)
+        except Exception:
+            pass
+
     def changeVerticalExaggeration(self, val):
         """
         Change the vertical exaggeration of the profile.
@@ -1857,6 +1871,10 @@ class TwwElevationProfileWidget(QWidget):
         """Remove the current map canvas highlight."""
         if self._current_highlight is not None:
             self._current_highlight.hide()
+            # Must remove from canvas scene — del only drops the Python reference,
+            # but the C++ QGraphicsScene still owns the item and keeps rendering it.
+            if self._map_canvas and self._map_canvas.scene():
+                self._map_canvas.scene().removeItem(self._current_highlight)
             del self._current_highlight
             self._current_highlight = None
         self._current_highlight_key = None

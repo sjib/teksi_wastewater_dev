@@ -946,6 +946,9 @@ class TeksiWastewaterPlugin:
         Gets called when the dock is closed
         All the cleanup of the dock has to be done here
         """
+        if self.plotWidget and hasattr(self.plotWidget, 'cleanup'):
+            self.plotWidget.cleanup()
+        self.plotWidget = None
         self.profile_dock = None
 
     def onProfileChanged(self, profile):
