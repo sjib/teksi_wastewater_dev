@@ -257,6 +257,7 @@ class TwwProfileMapTool(TwwMapTool):
 
     selectedPathPoints = []
     pathPolyline = []
+    _segment_history = []  # list of (vertices, edges) for undo
 
     def __init__(self, canvas, button, network_analyzer):
         TwwMapTool.__init__(self, canvas, button, network_analyzer)
@@ -307,11 +308,11 @@ class TwwProfileMapTool(TwwMapTool):
         @param end_point:   The id of the end point of the path
         """
         QApplication.setOverrideCursor(Qt.WaitCursor)
-        # try:
         (vertices, edges) = self.network_analyzer.shortestPath(start_point, end_point)
+        if len(vertices) > 0:
+            # Save segment for undo before appending
+            self._segment_history.append((vertices, edges))
         self.appendProfile(vertices, edges)
-        #        except:
-        #            pass
         QApplication.restoreOverrideCursor()
         if len(vertices) > 0:
             return True
@@ -453,6 +454,44 @@ class TwwProfileMapTool(TwwMapTool):
             )
             self.rbHelperLine.addPoint(mouse_pos)
 
+    def undoLastSegment(self):
+        """
+        Undo the last profile segment (Ctrl+Z).
+        Removes the last segment and rebuilds the profile from remaining history.
+        Reverts selectedPathPoints by one so the user can re-click a different node.
+        """
+        if not self._segment_history:
+            return
+
+        # Remove last segment
+        self._segment_history.pop()
+
+        # Revert selectedPathPoints by one (Option A: keep previous endpoint)
+        if len(self.selectedPathPoints) > 1:
+            self.selectedPathPoints.pop()
+
+        # Rebuild profile from remaining history
+        self.profile.reset()
+        self.pathPolyline = []
+        self.segmentOffset = 0
+        self.rubberBand.reset()
+
+        if self._segment_history:
+            for vertices, edges in self._segment_history:
+                self.appendProfile(vertices, edges)
+        else:
+            # No segments left, emit empty profile to clear canvas
+            self.profileChanged.emit(self.profile)
+
+    def keyPressEvent(self, event):
+        """
+        Handle key press events. Ctrl+Z triggers undo.
+        """
+        if event.key() == Qt.Key_Z and event.modifiers() & Qt.ControlModifier:
+            self.undoLastSegment()
+        else:
+            super().keyPressEvent(event)
+
     def rightClicked(self, _):
         """
         Cancel any ongoing path selection
@@ -473,6 +512,7 @@ class TwwProfileMapTool(TwwMapTool):
             self.rbHelperLine.reset()
             self.profile.reset()
             self.segmentOffset = 0
+            self._segment_history = []
 
     def leftClicked(self, event):
         """
@@ -496,6 +536,7 @@ class TwwProfileMapTool(TwwMapTool):
                 self.rubberBand.reset()
                 self.profile.reset()
                 self.segmentOffset = 0
+                self._segment_history = []
                 self.selectedPathPoints.append((match.featureId(), QgsPointXY(match.point())))
 
 
