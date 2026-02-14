@@ -77,6 +77,7 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         self.addDockWidget(self.location, self)
         self.canvas.setRenderFlag(True)
 
+        self.clearCanvasButton.clicked.connect(self.onClearCanvasClicked)
         self.printButton.clicked.connect(self.onPrintButtonClicked)
 
         self.mSliderVerticalExaggeration.valueChanged.connect(self.onVerticalExaggerationChanged)
@@ -98,6 +99,29 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
 
         if self.plotWidget:
             self.plotWidget.changeVerticalExaggeration(ve_val)
+
+    @pyqtSlot()
+    def onClearCanvasClicked(self):
+        """Clear the profile canvas and deselect features on map layers."""
+        # Clear the profile widget (canvas, hover, manhole dashes)
+        if self.plotWidget and hasattr(self.plotWidget, 'clearProfile'):
+            self.plotWidget.clearProfile()
+
+        # Clear stored tree data
+        self.nodes = None
+        self.edges = None
+        self.selectCurrentPathAction.setEnabled(False)
+
+        # Deselect features on all related map layers
+        for layer_name in [
+            "vw_tww_reach",
+            "vw_wastewater_node",
+            "vw_tww_wastewater_structure",
+            "vw_tww_catchment_area",
+        ]:
+            layer = TwwLayerManager.layer(layer_name)
+            if layer:
+                layer.removeSelection()
 
     @pyqtSlot()
     def onPrintButtonClicked(self):

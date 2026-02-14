@@ -295,7 +295,38 @@ class TwwElevationProfileWidget(QWidget):
         # This can be done by rendering the canvas to an image/PDF
         pass
 
+    def clearProfile(self):
+        """
+        Clear the profile canvas completely.
         
+        Called by TwwProfileDockWidget when the user clicks the Clear Canvas button.
+        Safely clears all profile-related state without crashing.
+        """
+        # Cancel any running profile generation jobs
+        if hasattr(self.canvas, 'cancelJobs'):
+            self.canvas.cancelJobs()
+        
+        # Clear hover state and map highlight
+        self._clearHoverState()
+        
+        # Clear manhole dashes
+        self.canvas.setManholeDashes([])
+        
+        # Reset profile generation flag
+        self._profile_generation_complete = False
+        
+        # Clear cached profile data
+        self._profile_curve_geom = None
+        
+        # Set an empty profile curve to clear old rendered data
+        # Note: canvas.clear() crashes QGIS, so we use an empty curve + refresh instead
+        empty_curve = QgsLineString()
+        self.canvas.setProfileCurve(empty_curve)
+        
+        if hasattr(self.canvas, 'invalidateCurrentPlotExtent'):
+            self.canvas.invalidateCurrentPlotExtent()
+        self.canvas.refresh()
+
     
     def _createReachLayerWithZ(self, original_layer):
         """
