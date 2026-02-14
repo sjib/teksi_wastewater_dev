@@ -41,7 +41,7 @@ from qgis.core import (
     QgsDoubleRange,
 )
 from qgis.PyQt.QtCore import QPoint, QPointF, QRect, Qt, QTimer
-from qgis.PyQt.QtGui import QColor, QCursor, QPainter, QPen
+from qgis.PyQt.QtGui import QBrush, QColor, QCursor, QPainter, QPen
 from qgis.PyQt.QtWidgets import QToolTip, QVBoxLayout, QWidget, QLabel
 from qgis.gui import QgsElevationProfileCanvas, QgsHighlight
 
@@ -164,7 +164,17 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
                 painter.drawLine(right_top, right_bottom)
                 
                 # Draw bottom line (connect left and right at bottom)
-                painter.drawLine(left_bottom, right_bottom)
+                # Use red circle if bottom_level data is missing
+                if dash.get("bottom_level_missing", False):
+                    # Draw red circle at bottom center (same size as cover marker)
+                    circle_radius = 10.0
+                    painter.setPen(QPen(QColor("#FF0000"), 1.5))
+                    painter.setBrush(QBrush(QColor("#FF0000")))
+                    painter.drawEllipse(bottom_pt, circle_radius, circle_radius)
+                    painter.setBrush(QBrush())  # Reset brush
+                    painter.setPen(shaft_pen)  # Restore shaft pen
+                else:
+                    painter.drawLine(left_bottom, right_bottom)
                 
                 # Draw cover line (horizontal line at top, slightly wider)
                 cover_pen = QPen(self._manhole_cover_color, 2.5)
@@ -221,6 +231,7 @@ class TwwElevationProfileWidget(QWidget):
         self._profile_curve_geom = None
         self._manhole_dash_tolerance = 10.0
         self._temp_reach_layer = None  # Temporary layer with Z values
+        self._temp_node_layer = None  # Filtered node layer (excludes bottom_level=0/NULL)
 
         # Hover state for profile canvas (used by the new elevation profile API)
         self._hover_enabled = True
@@ -394,6 +405,59 @@ class TwwElevationProfileWidget(QWidget):
         mem_layer.updateExtents()
         return mem_layer
 
+    def _createFilteredNodeLayer(self, original_layer):
+        """
+        Create a filtered copy of vw_wastewater_node that excludes nodes
+        with bottom_level = 0 or NULL, so they don't appear at elevation 0
+        in the profile canvas.
+        
+        :param original_layer: The original vw_wastewater_node layer
+        :return: Memory layer with only valid nodes, or None if creation fails
+        """
+        if original_layer is None:
+            return None
+        crs = original_layer.crs()
+        crs_string = crs.authid() if crs.isValid() else "EPSG:2056"
+        
+        # Determine geometry type string from original layer
+        geom_type = original_layer.geometryType()
+        if geom_type == Qgis.GeometryType.Point:
+            geom_str = "Point"
+        else:
+            geom_str = "Point"  # Fallback
+        
+        # Check if original has Z values
+        if original_layer.wkbType() in (QgsWkbTypes.PointZ, QgsWkbTypes.MultiPointZ, QgsWkbTypes.Point25D):
+            geom_str = "PointZ"
+        
+        mem_layer = QgsVectorLayer(
+            f"{geom_str}?crs={crs_string}",
+            "wastewater_node_filtered",
+            "memory"
+        )
+        provider = mem_layer.dataProvider()
+        provider.addAttributes(original_layer.fields().toList())
+        mem_layer.updateFields()
+        
+        features = []
+        for feat in original_layer.getFeatures():
+            attrs = self._featureAttributes(feat)
+            bottom_level = self._toFloat(
+                self._pickAttr(attrs, ["bottom_level", "bottomLevel", "invert_level"])
+            )
+            # Skip nodes with missing or zero bottom_level
+            if bottom_level is None or bottom_level == 0:
+                continue
+            
+            new_feat = QgsFeature()
+            new_feat.setGeometry(feat.geometry())
+            new_feat.setAttributes(feat.attributes())
+            features.append(new_feat)
+        
+        provider.addFeatures(features)
+        mem_layer.updateExtents()
+        return mem_layer
+
     def setupDataSources(self):
         """
         Set up data sources for the elevation profile canvas.
@@ -448,6 +512,13 @@ class TwwElevationProfileWidget(QWidget):
                 self._temp_reach_layer = self._createReachLayerWithZ(layer)
                 if self._temp_reach_layer:
                     layer = self._temp_reach_layer
+            
+            # Special handling for vw_wastewater_node: filter out nodes with
+            # bottom_level = 0 or NULL so they don't appear at elevation 0
+            if layer_name == 'vw_wastewater_node':
+                self._temp_node_layer = self._createFilteredNodeLayer(layer)
+                if self._temp_node_layer:
+                    layer = self._temp_node_layer
             
             # Store first valid CRS for canvas
             if first_valid_crs is None and layer.crs().isValid():
@@ -685,6 +756,7 @@ class TwwElevationProfileWidget(QWidget):
                             "obj_id": dash.get("obj_id"),
                             "cover_level": cover_level,
                             "bottom_level": bottom_level,
+                            "bottom_level_missing": dash.get("bottom_level_missing", False),
                             "width": width_px,
                             "node_type": "manhole",  # Mark as manhole for tooltip formatting
                             "_is_manhole_dash": True,  # Special flag
@@ -861,6 +933,7 @@ class TwwElevationProfileWidget(QWidget):
             # Use custom persistent tooltip instead of QToolTip
             # This avoids Qt's automatic timeout behavior
             if hasattr(self, '_custom_tooltip'):
+                self._custom_tooltip.setTextFormat(Qt.RichText)
                 self._custom_tooltip.setText(text)
                 self._custom_tooltip.adjustSize()
                 # Position tooltip slightly offset from cursor
@@ -974,9 +1047,18 @@ class TwwElevationProfileWidget(QWidget):
                 cover_level = manhole_data.get("cover_level")
                 self._appendLabeled(lines, "Cover level", self._formatMeters(cover_level, decimals=2))
                 
-                # Bottom level (from vm_wastewater_node.botoom_level)
+                # Bottom level (from vm_wastewater_node.bottom_level)
                 bottom_level = manhole_data.get("bottom_level")
-                self._appendLabeled(lines, "Bottom level", self._formatMeters(bottom_level, decimals=2))
+                bottom_level_missing = (
+                    manhole_data.get("bottom_level_missing", False)
+                    or attrs.get("bottom_level_missing", False)
+                    or bottom_level is None
+                    or bottom_level == 0
+                )
+                if bottom_level_missing:
+                    lines.append('Bottom level: <span style="color:red">Missing Data</span>')
+                else:
+                    self._appendLabeled(lines, "Bottom level", self._formatMeters(bottom_level, decimals=2))
                 
                 # Entry level (from upstream reach's exit level)
                 entry_level = manhole_data.get("entry_level")
@@ -1004,9 +1086,11 @@ class TwwElevationProfileWidget(QWidget):
                 if node_type:
                     lines.append(f"Type: {node_type}")
                 
-                # Show bottom level (elevation)
+                # Show bottom level (elevation) with missing data check
                 bottom_level = self._toFloat(self._pickAttr(attrs, ["bottom_level", "bottomLevel", "level", "invert_level"]))
-                if bottom_level is not None:
+                if bottom_level is None or bottom_level == 0:
+                    lines.append('Bottom level: <span style="color:red">Missing Data</span>')
+                elif bottom_level is not None:
                     lines.append(f"Level: {bottom_level:.2f} m")
                 elif plot_point is not None:
                     lines.append(f"Elevation: {plot_point.y():.2f} m")
@@ -1018,7 +1102,7 @@ class TwwElevationProfileWidget(QWidget):
         if plot_point is not None and not is_reach and not is_cover and not is_manhole:
             lines.append(f"distance: {plot_point.x():.2f}")
             lines.append(f"elevation: {plot_point.y():.2f}")
-        return "\n".join(lines)
+        return "<br>".join(lines)
 
     def _extractResultAttributes(self, result):
         """
@@ -1246,7 +1330,7 @@ class TwwElevationProfileWidget(QWidget):
         """
         Get enhanced manhole data from related tables:
         - Cover level from vm_cover.level
-        - Bottom level from vm_wastewater_node.botoom_level (note typo)
+        - Bottom level from vm_wastewater_node.bottom_level
         - Entry level from tww_wastewater_structure._input_label
         - Exit level from tww_wastewater_structure._output_label
         - Width (if available)
@@ -1312,7 +1396,6 @@ class TwwElevationProfileWidget(QWidget):
                 self._pickAttr(attrs, ["cover_level", "coverLevel"])
             )
         # 2. Query bottom level from vm_wastewater_node or vw_wastewater_node
-        # Note: field name is "botoom_level" (typo in DB)
         node_layer = TwwLayerManager.layer("vw_wastewater_node")
         if node_layer and obj_id:
             found_node = False
@@ -1322,7 +1405,7 @@ class TwwElevationProfileWidget(QWidget):
                 if str(node_obj_id) == str(obj_id):
                     # Found matching node - get bottom level
                     result["bottom_level"] = self._toFloat(
-                        self._pickAttr(node_attrs, ["botoom_level", "bottom_level", "bottomLevel", "invert_level"])
+                        self._pickAttr(node_attrs, ["bottom_level", "bottomLevel", "invert_level"])
                     )
                     # Also try to get width from node
                     result["width"] = self._toFloat(
@@ -1334,8 +1417,43 @@ class TwwElevationProfileWidget(QWidget):
         # Fallback: try to get bottom_level from current attrs
         if "bottom_level" not in result or result["bottom_level"] is None:
             result["bottom_level"] = self._toFloat(
-                self._pickAttr(attrs, ["botoom_level", "bottom_level", "bottomLevel", "invert_level"])
+                self._pickAttr(attrs, ["bottom_level", "bottomLevel", "invert_level"])
             )
+        # Detect missing bottom_level and use fallback
+        if result.get("bottom_level") is None or result.get("bottom_level") == 0:
+            # Try 1: use min(entry_level, exit_level) from WS structure
+            entry_lv = result.get("entry_level")
+            exit_lv = result.get("exit_level")
+            candidates = [v for v in (entry_lv, exit_lv) if v is not None]
+            if candidates:
+                result["bottom_level"] = min(candidates)
+                result["bottom_level_missing"] = True
+            else:
+                # Try 2: use min of connected reach levels
+                reach_layer = TwwLayerManager.layer("vw_tww_reach")
+                if reach_layer is not None and obj_id:
+                    reach_levels = []
+                    for reach_feat in reach_layer.getFeatures():
+                        reach_attrs = self._featureAttributes(reach_feat)
+                        to_node = self._pickAttr(reach_attrs, [
+                            "rp_to_fk_wastewater_networkelement",
+                        ])
+                        from_node = self._pickAttr(reach_attrs, [
+                            "rp_from_fk_wastewater_networkelement",
+                        ])
+                        if str(to_node) == str(obj_id):
+                            lv = self._toFloat(self._pickAttr(reach_attrs, ["rp_to_level"]))
+                            if lv is not None:
+                                reach_levels.append(lv)
+                        if str(from_node) == str(obj_id):
+                            lv = self._toFloat(self._pickAttr(reach_attrs, ["rp_from_level"]))
+                            if lv is not None:
+                                reach_levels.append(lv)
+                    if reach_levels:
+                        result["bottom_level"] = min(reach_levels)
+                result["bottom_level_missing"] = True
+        else:
+            result["bottom_level_missing"] = False
         return result
     
     def _isManholeHover(self, layer_name, attrs):
@@ -1480,11 +1598,17 @@ class TwwElevationProfileWidget(QWidget):
         if not points:
             return
         
+        # --- Clean up old state before setting new profile ---
+        self._clearHoverState()
+        self.canvas.setManholeDashes([])
+        self._profile_generation_complete = False
+        
         # Create a new QgsLineString with the points
         curve = QgsLineString(points)
         
-        # Ensure data sources are set up before setting the curve
-        # This is critical because the canvas needs layers and project to display the profile
+        # Set up data sources only on the first call
+        # NOTE: Do NOT re-call setupDataSources() — calling setLayers() on an
+        # active canvas causes access violation in QgsElevationProfileCanvas
         layers_configured = False
         if hasattr(self.canvas, 'layers'):
             layers = self.canvas.layers()
@@ -1643,6 +1767,30 @@ class TwwElevationProfileWidget(QWidget):
                     "geometry": cover_geom,
                 }
 
+        # Pre-build reach level lookup: node_obj_id -> list of connected reach levels
+        # This maps each node to the rp_to_level / rp_from_level of reaches connected to it
+        reach_levels_by_node = {}
+        reach_layer = TwwLayerManager.layer("vw_tww_reach")
+        if reach_layer is not None:
+            for reach_feat in reach_layer.getFeatures():
+                reach_attrs = self._featureAttributes(reach_feat)
+                # rp_to: the node this reach flows TO
+                to_node_id = self._pickAttr(reach_attrs, [
+                    "rp_to_fk_wastewater_networkelement",
+                    "rp_to_fk_wastewater_networkelement_id",
+                ])
+                to_level = self._toFloat(self._pickAttr(reach_attrs, ["rp_to_level"]))
+                if to_node_id and to_level is not None:
+                    reach_levels_by_node.setdefault(str(to_node_id), []).append(to_level)
+                # rp_from: the node this reach flows FROM
+                from_node_id = self._pickAttr(reach_attrs, [
+                    "rp_from_fk_wastewater_networkelement",
+                    "rp_from_fk_wastewater_networkelement_id",
+                ])
+                from_level = self._toFloat(self._pickAttr(reach_attrs, ["rp_from_level"]))
+                if from_node_id and from_level is not None:
+                    reach_levels_by_node.setdefault(str(from_node_id), []).append(from_level)
+
         dashes = []
         for feature in layer.getFeatures():
             geometry = feature.geometry()
@@ -1699,8 +1847,22 @@ class TwwElevationProfileWidget(QWidget):
                     ],
                 )
             )
-            if bottom_level is None:
-                bottom_level = self._pointZ(geometry.asPoint())
+            # Detect missing bottom_level (None or 0)
+            bottom_level_missing = False
+            if bottom_level is None or bottom_level == 0:
+                # Fallback: use min of connected reach levels (rp_to_level / rp_from_level)
+                node_obj_id = self._pickAttr(attrs, ["obj_id", "objId", "id"])
+                fallback_level = None
+                if node_obj_id:
+                    connected_levels = reach_levels_by_node.get(str(node_obj_id), [])
+                    if connected_levels:
+                        fallback_level = min(connected_levels)
+                if fallback_level is not None:
+                    bottom_level = fallback_level
+                    bottom_level_missing = True
+                else:
+                    # No fallback available, skip this manhole
+                    continue
             if cover_level is None or bottom_level is None:
                 continue
 
@@ -1711,6 +1873,7 @@ class TwwElevationProfileWidget(QWidget):
                     "distance": float(distance_along),
                     "cover_level": cover_level,
                     "bottom_level": bottom_level,
+                    "bottom_level_missing": bottom_level_missing,
                     "width": line_width,
                     "obj_id": obj_id,  # Save obj_id for hover tooltip
                     "color": "#6E4C1E",  # Brown color for manhole shafts

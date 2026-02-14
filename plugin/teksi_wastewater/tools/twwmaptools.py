@@ -491,6 +491,11 @@ class TwwProfileMapTool(TwwMapTool):
                     msg = self.msgBar.createMessage("No path found")
                     self.msgBar.pushWidget(msg, Qgis.Info)
             else:
+                # Starting a new path - clear old accumulated data
+                self.pathPolyline = []
+                self.rubberBand.reset()
+                self.profile.reset()
+                self.segmentOffset = 0
                 self.selectedPathPoints.append((match.featureId(), QgsPointXY(match.point())))
 
 

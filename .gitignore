@@ -21,3 +21,4 @@ plugin*.tar.gz
 __pycache__
 .DS_Store
 .cursor
+.agent
