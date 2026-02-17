@@ -483,7 +483,12 @@ class TeksiWastewaterPlugin:
         """
         Is executed when the profile button is clicked
         """
-        
+        if not self.profileAction.isChecked():
+            # Button was unchecked — close the dock
+            if self.profile_dock is not None:
+                self.profile_dock.close()
+            return
+
         self.openDock()
         # Set the profile map tool
         self.profile_tool.setActive()
