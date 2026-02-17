@@ -946,6 +946,25 @@ class TeksiWastewaterPlugin:
         Gets called when the dock is closed
         All the cleanup of the dock has to be done here
         """
+        # Deactivate profile map tool and restore previous tool
+        if hasattr(self, 'profile_tool') and self.profile_tool:
+            canvas = self.iface.mapCanvas()
+            # Save extent before cleanup to prevent zoom caused by rubberBand.reset()
+            saved_extent = canvas.extent()
+
+            if self.profile_tool.saveTool:
+                canvas.setMapTool(self.profile_tool.saveTool)
+            else:
+                canvas.unsetMapTool(self.profile_tool)
+
+            # Restore the original extent to prevent unwanted zoom
+            canvas.setExtent(saved_extent)
+
+        # Clear elevation profile widget highlight
+        if self.plotWidget and hasattr(self.plotWidget, '_clearHighlight'):
+            self.plotWidget._clearHighlight()
+
+        self.profileAction.setChecked(False)
         self.profile_dock = None
 
     def onProfileChanged(self, profile):
