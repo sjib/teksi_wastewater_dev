@@ -145,15 +145,21 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
                 painter.drawLine(left_top, left_bottom)
                 painter.drawLine(right_top, right_bottom)
 
-                # Draw bottom line (connect left and right at bottom)
-                # Use red circle if bottom_level data is missing
+                # Draw bottom line; replace with red X if bottom_level data is missing
                 if dash.get("bottom_level_missing", False):
-                    # Draw red circle at bottom center (same size as cover marker)
-                    circle_radius = 10.0
-                    painter.setPen(QPen(QColor("#FF0000"), 1.5))
-                    painter.setBrush(QBrush(QColor("#FF0000")))
-                    painter.drawEllipse(bottom_pt, circle_radius, circle_radius)
-                    painter.setBrush(QBrush())  # Reset brush
+                    # Draw red "X" at bottom center to indicate missing bottom_level data
+                    x_size = 8.0  # half-length of each X arm in pixels
+                    x_pen = QPen(QColor("#FF0000"), 2.5)
+                    x_pen.setCapStyle(Qt.RoundCap)
+                    painter.setPen(x_pen)
+                    painter.drawLine(
+                        QPointF(bottom_pt.x() - x_size, bottom_pt.y() - x_size),
+                        QPointF(bottom_pt.x() + x_size, bottom_pt.y() + x_size),
+                    )
+                    painter.drawLine(
+                        QPointF(bottom_pt.x() + x_size, bottom_pt.y() - x_size),
+                        QPointF(bottom_pt.x() - x_size, bottom_pt.y() + x_size),
+                    )
                     painter.setPen(shaft_pen)  # Restore shaft pen
                 else:
                     painter.drawLine(left_bottom, right_bottom)
