@@ -632,14 +632,14 @@ class ProfileHoverManager:
             result["brand"] = _pick_attr(attrs, ["brand"])
             return result
 
-        for feat in cover_layer.getFeatures():
+        request = QgsFeatureRequest().setFilterExpression(f'"obj_id" = \'{obj_id}\'')
+        request.setLimit(1)
+        for feat in cover_layer.getFeatures(request):
             feat_attrs = _feature_attributes(feat)
-            if str(_pick_attr(feat_attrs, ["obj_id", "objId", "id"])) == str(obj_id):
-                result["level"] = _to_float(_pick_attr(feat_attrs, ["level"]))
-                result["material"] = _pick_attr(feat_attrs, ["material"])
-                result["cover_shape"] = _pick_attr(feat_attrs, ["cover_shape"])
-                result["brand"] = _pick_attr(feat_attrs, ["brand"])
-                break
+            result["level"] = _to_float(_pick_attr(feat_attrs, ["level"]))
+            result["material"] = _pick_attr(feat_attrs, ["material"])
+            result["cover_shape"] = _pick_attr(feat_attrs, ["cover_shape"])
+            result["brand"] = _pick_attr(feat_attrs, ["brand"])
 
         return result
 
@@ -649,10 +649,6 @@ class ProfileHoverManager:
 
         Queries: vw_tww_wastewater_structure, vm_cover/vw_cover, vw_wastewater_node.
 
-        TODO (Performance): Replace full-table iteration with filtered QgsFeatureRequest:
-            request = QgsFeatureRequest().setFilterExpression(f'"obj_id" = \\'{obj_id}\\'')
-            request.setLimit(1)
-        See profile-dev-guide SKILL.md §3.2 for details.
         """
         result = {}
         ws_id = _pick_attr(
@@ -673,38 +669,29 @@ class ProfileHoverManager:
             "tww_wastewater_structure"
         )
         if ws_layer and ws_id:
-            for ws_feat in ws_layer.getFeatures():
+            request = QgsFeatureRequest().setFilterExpression(f'"obj_id" = \'{ws_id}\'')
+            request.setLimit(1)
+            for ws_feat in ws_layer.getFeatures(request):
                 ws_attrs = _feature_attributes(ws_feat)
-                if str(_pick_attr(ws_attrs, ["obj_id", "objId", "id"])) == str(ws_id):
-                    result["entry_level"] = _to_float(
-                        _pick_attr(ws_attrs, ["_input_label", "input_label", "entry_level"])
-                    )
-                    result["exit_level"] = _to_float(
-                        _pick_attr(ws_attrs, ["_output_label", "output_label", "exit_level"])
-                    )
-                    break
+                result["entry_level"] = _to_float(
+                    _pick_attr(ws_attrs, ["_input_label", "input_label", "entry_level"])
+                )
+                result["exit_level"] = _to_float(
+                    _pick_attr(ws_attrs, ["_output_label", "output_label", "exit_level"])
+                )
 
-        # 2. Query cover level from vm_cover or vw_cover
+        # 2. Query cover level from vm_cover or vw_cover (join on fk_wastewater_structure)
         cover_layer = TwwLayerManager.layer("vm_cover") or TwwLayerManager.layer("vw_cover")
         if cover_layer and ws_id:
-            for cover_feat in cover_layer.getFeatures():
+            request = QgsFeatureRequest().setFilterExpression(
+                f'"fk_wastewater_structure" = \'{ws_id}\''
+            )
+            request.setLimit(1)
+            for cover_feat in cover_layer.getFeatures(request):
                 cover_attrs = _feature_attributes(cover_feat)
-                cover_ws_id = _pick_attr(
-                    cover_attrs,
-                    [
-                        "fk_wastewater_structure",
-                        "fk_wastewater_structure_obj_id",
-                        "ws_obj_id",
-                        "fk_wastewater_structure_id",
-                    ],
+                result["cover_level"] = _to_float(
+                    _pick_attr(cover_attrs, ["level", "cover_level", "coverLevel", "elevation"])
                 )
-                if str(cover_ws_id) == str(ws_id):
-                    result["cover_level"] = _to_float(
-                        _pick_attr(
-                            cover_attrs, ["level", "cover_level", "coverLevel", "elevation"]
-                        )
-                    )
-                    break
 
         if "cover_level" not in result or result["cover_level"] is None:
             result["cover_level"] = _to_float(_pick_attr(attrs, ["cover_level", "coverLevel"]))
@@ -712,16 +699,16 @@ class ProfileHoverManager:
         # 3. Query bottom level from vw_wastewater_node
         node_layer = TwwLayerManager.layer("vw_wastewater_node")
         if node_layer and obj_id:
-            for node_feat in node_layer.getFeatures():
+            request = QgsFeatureRequest().setFilterExpression(f'"obj_id" = \'{obj_id}\'')
+            request.setLimit(1)
+            for node_feat in node_layer.getFeatures(request):
                 node_attrs = _feature_attributes(node_feat)
-                if str(_pick_attr(node_attrs, ["obj_id", "objId", "id"])) == str(obj_id):
-                    result["bottom_level"] = _to_float(
-                        _pick_attr(node_attrs, ["bottom_level", "bottomLevel", "invert_level"])
-                    )
-                    result["width"] = _to_float(
-                        _pick_attr(node_attrs, ["dimension1", "width", "diameter"])
-                    )
-                    break
+                result["bottom_level"] = _to_float(
+                    _pick_attr(node_attrs, ["bottom_level", "bottomLevel", "invert_level"])
+                )
+                result["width"] = _to_float(
+                    _pick_attr(node_attrs, ["dimension1", "width", "diameter"])
+                )
 
         if "bottom_level" not in result or result["bottom_level"] is None:
             result["bottom_level"] = _to_float(
@@ -739,8 +726,13 @@ class ProfileHoverManager:
             else:
                 reach_layer = TwwLayerManager.layer("vw_tww_reach")
                 if reach_layer is not None and obj_id:
+                    expr = (
+                        f'"rp_to_fk_wastewater_networkelement" = \'{obj_id}\''
+                        f' OR "rp_from_fk_wastewater_networkelement" = \'{obj_id}\''
+                    )
+                    request = QgsFeatureRequest().setFilterExpression(expr)
                     reach_levels = []
-                    for reach_feat in reach_layer.getFeatures():
+                    for reach_feat in reach_layer.getFeatures(request):
                         reach_attrs = _feature_attributes(reach_feat)
                         to_node = _pick_attr(
                             reach_attrs, ["rp_to_fk_wastewater_networkelement"]
