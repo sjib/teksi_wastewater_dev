@@ -286,36 +286,29 @@ class TwwElevationProfileWidget(QWidget):
             self.canvas.setManholeDashes([])
             return
 
-        cover_layer = TwwLayerManager.layer("vw_cover") or TwwLayerManager.layer("vm_cover")
-
-        # Build cover lookup: ws_id → {cover_level, geometry}
-        cover_by_ws = {}
-        if cover_layer is not None:
-            for cover_feature in cover_layer.getFeatures():
-                cover_attrs = _feature_attributes(cover_feature)
-                ws_id = _pick_attr(
-                    cover_attrs,
-                    [
-                        "fk_wastewater_structure",
-                        "fk_wastewater_structure_obj_id",
-                        "ws_obj_id",
-                        "fk_wastewater_structure_id",
-                    ],
-                )
-                if not ws_id:
+        # Preload structure attributes keyed by AK-id (vw_wastewater_node.obj_id == ws.wn_obj_id).
+        # vw_wastewater_node has no dimension1/cover_level fields; the authoritative source
+        # for shaft width / cover level / bottom level is vw_tww_wastewater_structure.
+        # Single full-table scan replaces the former vw_cover scan and powers the per-node loop.
+        ws_data_by_ak = {}
+        ws_layer = TwwLayerManager.layer("vw_tww_wastewater_structure")
+        if ws_layer is not None:
+            for ws_feat in ws_layer.getFeatures():
+                ws_attrs = _feature_attributes(ws_feat)
+                ak_id = _pick_attr(ws_attrs, ["wn_obj_id"])
+                if not ak_id:
                     continue
-                cover_level = _to_float(
-                    _pick_attr(cover_attrs, ["cover_level", "level", "elevation", "z"])
-                )
-                if cover_level is None:
-                    cover_geom = cover_feature.geometry()
-                    if cover_geom and not cover_geom.isEmpty():
-                        cover_level = self._pointZ(cover_geom.asPoint())
-                if cover_level is None:
-                    continue
-                cover_by_ws[str(ws_id)] = {
-                    "cover_level": cover_level,
-                    "geometry": cover_feature.geometry(),
+                ws_data_by_ak[str(ak_id)] = {
+                    "ma_dimension1": _to_float(_pick_attr(ws_attrs, ["ma_dimension1"])),
+                    "ma_dimension2": _to_float(_pick_attr(ws_attrs, ["ma_dimension2"])),
+                    "co_level": _to_float(_pick_attr(ws_attrs, ["co_level"])),
+                    "wn_bottom_level": _to_float(_pick_attr(ws_attrs, ["wn_bottom_level"])),
+                    "ws_type": _pick_attr(ws_attrs, ["ws_type"]),
+                    "ss_function": _pick_attr(ws_attrs, ["ss_function"]),
+                    "_cover_label": _pick_attr(ws_attrs, ["_cover_label"]),
+                    "_bottom_label": _pick_attr(ws_attrs, ["_bottom_label"]),
+                    "_input_label": _pick_attr(ws_attrs, ["_input_label"]),
+                    "_output_label": _pick_attr(ws_attrs, ["_output_label"]),
                 }
 
         # Build reach-level lookup: node_obj_id → [connected reach levels]
@@ -354,23 +347,8 @@ class TwwElevationProfileWidget(QWidget):
             if geometry is None or geometry.isEmpty():
                 continue
             attrs = _feature_attributes(feature)
-            ws_id = _pick_attr(
-                attrs,
-                [
-                    "fk_wastewater_structure",
-                    "fk_wastewater_structure_obj_id",
-                    "ws_obj_id",
-                    "fk_wastewater_structure_id",
-                ],
-            )
-
-            cover_level = None
-            cover_geometry = None
-            if ws_id:
-                cover_data = cover_by_ws.get(str(ws_id))
-                if cover_data:
-                    cover_level = cover_data.get("cover_level")
-                    cover_geometry = cover_data.get("geometry")
+            obj_id = _pick_attr(attrs, ["obj_id", "objId", "id"])
+            ws_info = ws_data_by_ak.get(str(obj_id)) if obj_id else None
 
             if geometry.type() != Qgis.GeometryType.Point:
                 try:
@@ -392,10 +370,9 @@ class TwwElevationProfileWidget(QWidget):
             except Exception:
                 pass
 
-            if cover_level is None:
-                cover_level = _to_float(_pick_attr(attrs, ["cover_level", "coverLevel"]))
-            if cover_level is None and cover_geometry is not None and not cover_geometry.isEmpty():
-                cover_level = self._pointZ(cover_geometry.asPoint())
+            # cover_level: single source — vw_tww_wastewater_structure.co_level
+            # (58% coverage in production; nodes without a cover level are skipped below).
+            cover_level = ws_info.get("co_level") if ws_info else None
 
             bottom_level = _to_float(
                 _pick_attr(
@@ -413,10 +390,9 @@ class TwwElevationProfileWidget(QWidget):
 
             bottom_level_missing = False
             if bottom_level is None or bottom_level == 0:
-                node_obj_id = _pick_attr(attrs, ["obj_id", "objId", "id"])
                 fallback_level = None
-                if node_obj_id:
-                    connected_levels = reach_levels_by_node.get(str(node_obj_id), [])
+                if obj_id:
+                    connected_levels = reach_levels_by_node.get(str(obj_id), [])
                     if connected_levels:
                         fallback_level = min(connected_levels)
                 if fallback_level is not None:
@@ -428,8 +404,8 @@ class TwwElevationProfileWidget(QWidget):
             if cover_level is None or bottom_level is None:
                 continue
 
-            line_width = self._manholeDashWidth(attrs)
-            obj_id = _pick_attr(attrs, ["obj_id", "objId", "id"])
+            dim1_mm = ws_info.get("ma_dimension1") if ws_info else None
+            line_width = self._manholeDashWidth(dim1_mm)
             dashes.append(
                 {
                     "distance": float(distance_along),
@@ -444,56 +420,25 @@ class TwwElevationProfileWidget(QWidget):
 
         self.canvas.setManholeDashes(dashes)
 
-    def _manholeDashWidth(self, attrs):
+    def _manholeDashWidth(self, dim1_mm):
         """
-        Calculate the pixel width for a manhole shaft based on its diameter.
+        Calculate the pixel width for a manhole shaft.
 
-        TODO: Get actual diameter from DB fields (dimension1) when available.
-        Currently falls back to default 10px if no diameter is found.
+        :param dim1_mm: Shaft diameter / first dimension in millimetres
+            (from vw_tww_wastewater_structure.ma_dimension1). None when the
+            structure has no recorded dimension (e.g. special_structure).
+        :return: Line width in pixels (mm/100, clamped 6–16px). Falls back to
+            canvas default (~10px) when dim1_mm is missing.
 
-        :param attrs: Feature attributes dict.
-        :return: Line width in pixels (scaled from diameter_mm, clamped 6–16px).
+        TODO: switch to true-scale rendering once Pipe Band lands —
+            half_px = (dim1_mm / 1000.0) * px_per_m / 2.0, clamped >= 2px.
+            See profile/reference.md §5.2.
         """
-        diameter = _to_float(
-            _pick_attr(
-                attrs,
-                [
-                    "dimension1",
-                    "dimension_1",
-                    "diameter",
-                    "manhole_diameter",
-                    "diameter_mm",
-                    "width",
-                    "clear_height",
-                ],
-            )
-        )
-
         default_px = (
             self.canvas._manhole_default_px_width
             if hasattr(self.canvas, "_manhole_default_px_width")
             else 10
         )
-
-        if diameter is None:
+        if dim1_mm is None:
             return default_px
-
-        # Convert meters to mm if value appears to be in meters (< 10)
-        diameter_mm = diameter * 1000.0 if diameter < 10 else diameter
-        width = diameter_mm / 100.0
-        return max(6.0, min(16.0, float(width)))
-
-    # ------------------------------------------------------------------
-    # Geometry Z helper (used by _refreshManholeDashes)
-    # ------------------------------------------------------------------
-
-    def _pointZ(self, point):
-        if point is None:
-            return None
-        if hasattr(point, "z"):
-            try:
-                z_value = point.z() if callable(point.z) else point.z
-                return _to_float(z_value)
-            except Exception:
-                return None
-        return None
+        return max(6.0, min(16.0, float(dim1_mm) / 100.0))

@@ -513,10 +513,18 @@ class ProfileHoverManager:
                 lines.append(f"Manhole: {obj_id}" if obj_id else "Manhole")
                 manhole_data = self._getManholeEnhancedData(obj_id, attrs, feature)
 
+                # Cover / Bottom: prefer DB-pre-formatted label (handles multi-cover etc.);
+                # fall back to numeric format if the label field is missing.
                 cover_level = manhole_data.get("cover_level")
-                self._appendLabeled(
-                    lines, "Cover level", self._formatMeters(cover_level, decimals=2)
-                )
+                cover_label = manhole_data.get("cover_label")
+                if cover_label:
+                    lines.append(
+                        "Cover level: " + str(cover_label).replace("\n", "<br>&nbsp;&nbsp;")
+                    )
+                else:
+                    self._appendLabeled(
+                        lines, "Cover level", self._formatMeters(cover_level, decimals=2)
+                    )
 
                 bottom_level = manhole_data.get("bottom_level")
                 bottom_level_missing = (
@@ -528,18 +536,29 @@ class ProfileHoverManager:
                 if bottom_level_missing:
                     lines.append('Bottom level: <span style="color:red">Missing Data</span>')
                 else:
-                    self._appendLabeled(
-                        lines, "Bottom level", self._formatMeters(bottom_level, decimals=2)
-                    )
+                    bottom_label = manhole_data.get("bottom_label")
+                    if bottom_label:
+                        lines.append(
+                            "Bottom level: " + str(bottom_label).replace("\n", "<br>&nbsp;&nbsp;")
+                        )
+                    else:
+                        self._appendLabeled(
+                            lines, "Bottom level", self._formatMeters(bottom_level, decimals=2)
+                        )
 
-                entry_level = manhole_data.get("entry_level")
-                self._appendLabeled(
-                    lines, "Entry level", self._formatMeters(entry_level, decimals=2)
-                )
-                exit_level = manhole_data.get("exit_level")
-                self._appendLabeled(
-                    lines, "Exit level", self._formatMeters(exit_level, decimals=2)
-                )
+                # _input_label / _output_label are pre-formatted multi-line strings
+                # from the DB (e.g. '\nI1=2200.00\nI2=2200.00'); convert NL → <br>
+                # so they render in the RichText tooltip.
+                input_label = manhole_data.get("input_label")
+                if input_label:
+                    lines.append(
+                        "Entry level:" + str(input_label).replace("\n", "<br>&nbsp;&nbsp;")
+                    )
+                output_label = manhole_data.get("output_label")
+                if output_label:
+                    lines.append(
+                        "Exit level:" + str(output_label).replace("\n", "<br>&nbsp;&nbsp;")
+                    )
                 if cover_level is not None and bottom_level is not None:
                     depth = cover_level - bottom_level
                     self._appendLabeled(lines, "Depth", self._formatMeters(depth, decimals=2))
@@ -664,7 +683,10 @@ class ProfileHoverManager:
         if not ws_id:
             ws_id = obj_id
 
-        # 1. Query vw_tww_wastewater_structure for entry/exit labels
+        # 1. Query vw_tww_wastewater_structure for entry/exit labels and shaft width.
+        # NB: vw_wastewater_node has NO dimension1 / width / diameter fields; the
+        # only authoritative shaft-width source is ma_dimension1 (mm) on the
+        # wastewater_structure view.
         ws_layer = TwwLayerManager.layer("vw_tww_wastewater_structure") or TwwLayerManager.layer(
             "tww_wastewater_structure"
         )
@@ -673,12 +695,13 @@ class ProfileHoverManager:
             request.setLimit(1)
             for ws_feat in ws_layer.getFeatures(request):
                 ws_attrs = _feature_attributes(ws_feat)
-                result["entry_level"] = _to_float(
-                    _pick_attr(ws_attrs, ["_input_label", "input_label", "entry_level"])
-                )
-                result["exit_level"] = _to_float(
-                    _pick_attr(ws_attrs, ["_output_label", "output_label", "exit_level"])
-                )
+                # _*_label are pre-formatted strings from the DB
+                # (e.g. '\nI1=2200.00\nI2=2200.00'), not numbers — keep them raw.
+                result["cover_label"] = _pick_attr(ws_attrs, ["_cover_label"])
+                result["bottom_label"] = _pick_attr(ws_attrs, ["_bottom_label"])
+                result["input_label"] = _pick_attr(ws_attrs, ["_input_label", "input_label"])
+                result["output_label"] = _pick_attr(ws_attrs, ["_output_label", "output_label"])
+                result["width"] = _to_float(_pick_attr(ws_attrs, ["ma_dimension1"]))
 
         # 2. Query cover level from vm_cover or vw_cover (join on fk_wastewater_structure)
         cover_layer = TwwLayerManager.layer("vm_cover") or TwwLayerManager.layer("vw_cover")
@@ -706,51 +729,39 @@ class ProfileHoverManager:
                 result["bottom_level"] = _to_float(
                     _pick_attr(node_attrs, ["bottom_level", "bottomLevel", "invert_level"])
                 )
-                result["width"] = _to_float(
-                    _pick_attr(node_attrs, ["dimension1", "width", "diameter"])
-                )
 
         if "bottom_level" not in result or result["bottom_level"] is None:
             result["bottom_level"] = _to_float(
                 _pick_attr(attrs, ["bottom_level", "bottomLevel", "invert_level"])
             )
 
-        # 4. Fallback for missing bottom_level
+        # 4. Fallback for missing bottom_level: query connected reach endpoints.
         if result.get("bottom_level") is None or result.get("bottom_level") == 0:
-            entry_lv = result.get("entry_level")
-            exit_lv = result.get("exit_level")
-            candidates = [v for v in (entry_lv, exit_lv) if v is not None]
-            if candidates:
-                result["bottom_level"] = min(candidates)
-                result["bottom_level_missing"] = True
-            else:
-                reach_layer = TwwLayerManager.layer("vw_tww_reach")
-                if reach_layer is not None and obj_id:
-                    expr = (
-                        f'"rp_to_fk_wastewater_networkelement" = \'{obj_id}\''
-                        f' OR "rp_from_fk_wastewater_networkelement" = \'{obj_id}\''
+            reach_layer = TwwLayerManager.layer("vw_tww_reach")
+            if reach_layer is not None and obj_id:
+                expr = (
+                    f'"rp_to_fk_wastewater_networkelement" = \'{obj_id}\''
+                    f' OR "rp_from_fk_wastewater_networkelement" = \'{obj_id}\''
+                )
+                request = QgsFeatureRequest().setFilterExpression(expr)
+                reach_levels = []
+                for reach_feat in reach_layer.getFeatures(request):
+                    reach_attrs = _feature_attributes(reach_feat)
+                    to_node = _pick_attr(reach_attrs, ["rp_to_fk_wastewater_networkelement"])
+                    from_node = _pick_attr(
+                        reach_attrs, ["rp_from_fk_wastewater_networkelement"]
                     )
-                    request = QgsFeatureRequest().setFilterExpression(expr)
-                    reach_levels = []
-                    for reach_feat in reach_layer.getFeatures(request):
-                        reach_attrs = _feature_attributes(reach_feat)
-                        to_node = _pick_attr(
-                            reach_attrs, ["rp_to_fk_wastewater_networkelement"]
-                        )
-                        from_node = _pick_attr(
-                            reach_attrs, ["rp_from_fk_wastewater_networkelement"]
-                        )
-                        if str(to_node) == str(obj_id):
-                            lv = _to_float(_pick_attr(reach_attrs, ["rp_to_level"]))
-                            if lv is not None:
-                                reach_levels.append(lv)
-                        if str(from_node) == str(obj_id):
-                            lv = _to_float(_pick_attr(reach_attrs, ["rp_from_level"]))
-                            if lv is not None:
-                                reach_levels.append(lv)
-                    if reach_levels:
-                        result["bottom_level"] = min(reach_levels)
-                result["bottom_level_missing"] = True
+                    if str(to_node) == str(obj_id):
+                        lv = _to_float(_pick_attr(reach_attrs, ["rp_to_level"]))
+                        if lv is not None:
+                            reach_levels.append(lv)
+                    if str(from_node) == str(obj_id):
+                        lv = _to_float(_pick_attr(reach_attrs, ["rp_from_level"]))
+                        if lv is not None:
+                            reach_levels.append(lv)
+                if reach_levels:
+                    result["bottom_level"] = min(reach_levels)
+            result["bottom_level_missing"] = True
         else:
             result["bottom_level_missing"] = False
 

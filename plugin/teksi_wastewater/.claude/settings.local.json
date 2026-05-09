@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l gui/profile/*.py)",
+      "Bash(mkdir -p \"C:\\\\Users\\\\shang\\\\Documents\\\\QGIS\\\\teksi_wastewater_dev\\\\.agent\\\\skills\\\\profile\")",
+      "Read(//c/Users/shang/Documents/QGIS/teksi_wastewater_dev/.agent/skills/**)",
+      "Bash(wc -l *.md)"
+    ]
+  }
+}
