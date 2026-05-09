@@ -69,7 +69,7 @@ class ProfileHoverManager:
         # Persistent tooltip widget (avoids QToolTip auto-timeout)
         self._custom_tooltip = QLabel(None)
         self._custom_tooltip.setWindowFlags(
-            Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+            Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
         )
         self._custom_tooltip.setStyleSheet(
             """
@@ -415,7 +415,7 @@ class ProfileHoverManager:
         if need_update:
             self._last_hover_global_pos = current_pos
             self._last_tooltip_text = text
-            self._custom_tooltip.setTextFormat(Qt.RichText)
+            self._custom_tooltip.setTextFormat(Qt.TextFormat.RichText)
             self._custom_tooltip.setText(text)
             self._custom_tooltip.adjustSize()
             tooltip_pos = QPoint(current_pos.x() + 10, current_pos.y() + 10)

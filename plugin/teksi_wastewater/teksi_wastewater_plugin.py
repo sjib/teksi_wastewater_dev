@@ -686,7 +686,7 @@ class TeksiWastewaterPlugin:
                                     # Check if item text contains layer name or ID
                                     if layer_name_check in item_text or layer_id in item_text:
                                         # Set item to checked
-                                        item.setCheckState(0, Qt.Checked)
+                                        item.setCheckState(0, Qt.CheckState.Checked)
                                         self.logger.info(f"Checked layer {layer_name_check} in elevation profile layer list")
                                         
                                         # Expand parent if it's a tree
@@ -699,11 +699,11 @@ class TeksiWastewaterPlugin:
                                     
                                     # Also try checking by data (layer might be stored as data)
                                     for col in range(item.columnCount()):
-                                        item_data = item.data(col, Qt.UserRole)
+                                        item_data = item.data(col, Qt.ItemDataRole.UserRole)
                                         if item_data:
                                             item_data_str = str(item_data)
                                             if layer_id in item_data_str or layer_name_check in item_data_str:
-                                                item.setCheckState(0, Qt.Checked)
+                                                item.setCheckState(0, Qt.CheckState.Checked)
                                                 self.logger.info(f"Checked layer {layer_name_check} in elevation profile layer list (by data)")
                                                 
                                                 # Expand parent

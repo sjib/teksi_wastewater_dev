@@ -379,8 +379,8 @@ class ProfileLayerSetup:
                     inner_layer = QgsSimpleLineSymbolLayer()
                     inner_layer.setColor(QColor(style.get("line_inner", "#FFFFFF")))
                     inner_layer.setWidth(inner_width)
-                    inner_layer.setPenCapStyle(Qt.FlatCap)
-                    inner_layer.setPenJoinStyle(Qt.RoundJoin)
+                    inner_layer.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+                    inner_layer.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
                     line_symbol.appendSymbolLayer(inner_layer)
 
                     outline_width = style.get("outline_width", 0.8)
@@ -388,16 +388,16 @@ class ProfileLayerSetup:
                     outline_layer.setColor(QColor(style["line"]))
                     outline_layer.setWidth(outline_width)
                     outline_layer.setOffset(inner_width / 2 - outline_width / 2)
-                    outline_layer.setPenCapStyle(Qt.FlatCap)
-                    outline_layer.setPenJoinStyle(Qt.RoundJoin)
+                    outline_layer.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+                    outline_layer.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
                     line_symbol.appendSymbolLayer(outline_layer)
 
                     bottom_layer = QgsSimpleLineSymbolLayer()
                     bottom_layer.setColor(QColor(style["line"]))
                     bottom_layer.setWidth(outline_width)
                     bottom_layer.setOffset(-(inner_width / 2 - outline_width / 2))
-                    bottom_layer.setPenCapStyle(Qt.FlatCap)
-                    bottom_layer.setPenJoinStyle(Qt.RoundJoin)
+                    bottom_layer.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+                    bottom_layer.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
                     line_symbol.appendSymbolLayer(bottom_layer)
                 else:
                     line_symbol = QgsLineSymbol.createSimple(

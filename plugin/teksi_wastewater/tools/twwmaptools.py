@@ -488,7 +488,7 @@ class TwwProfileMapTool(TwwMapTool):
         """
         Handle key press events. Ctrl+Z triggers undo.
         """
-        if event.key() == Qt.Key_Z and event.modifiers() & Qt.ControlModifier:
+        if event.key() == Qt.Key.Key_Z and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.undoLastSegment()
         else:
             super().keyPressEvent(event)

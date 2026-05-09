@@ -137,8 +137,8 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
 
                 # Shaft wall pen (brown, 1.5px)
                 shaft_pen = QPen(self._manhole_shaft_color, 1.5)
-                shaft_pen.setStyle(Qt.SolidLine)
-                shaft_pen.setCapStyle(Qt.FlatCap)
+                shaft_pen.setStyle(Qt.PenStyle.SolidLine)
+                shaft_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
                 painter.setPen(shaft_pen)
 
                 # Draw shaft walls
@@ -150,7 +150,7 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
                     # Draw red "X" at bottom center to indicate missing bottom_level data
                     x_size = 8.0  # half-length of each X arm in pixels
                     x_pen = QPen(QColor("#FF0000"), 2.5)
-                    x_pen.setCapStyle(Qt.RoundCap)
+                    x_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
                     painter.setPen(x_pen)
                     painter.drawLine(
                         QPointF(bottom_pt.x() - x_size, bottom_pt.y() - x_size),
@@ -166,8 +166,8 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
 
                 # Draw cover line (horizontal line at top, slightly wider)
                 cover_pen = QPen(self._manhole_cover_color, 2.5)
-                cover_pen.setStyle(Qt.SolidLine)
-                cover_pen.setCapStyle(Qt.FlatCap)
+                cover_pen.setStyle(Qt.PenStyle.SolidLine)
+                cover_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
                 painter.setPen(cover_pen)
 
                 cover_left = QPointF(cover_pt.x() - half_width - 3, cover_pt.y())
