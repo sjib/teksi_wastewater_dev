@@ -91,7 +91,7 @@ class TwwMapTool(QgsMapTool):
     def __init__(self, iface: QgisInterface, button, network_analyzer: TwwGraphManager = None):
         QgsMapTool.__init__(self, iface.mapCanvas())
         self.canvas = iface.mapCanvas()
-        self.cursor = QCursor(Qt.CrossCursor)
+        self.cursor = QCursor(Qt.CursorShape.CrossCursor)
         self.button = button
         self.msgBar = iface.messageBar()
         self.network_analyzer = network_analyzer
@@ -139,7 +139,7 @@ class TwwMapTool(QgsMapTool):
         """
         Issues rightClicked and leftClicked events
         """
-        if event.button() == Qt.RightButton:
+        if event.button() == Qt.MouseButton.RightButton:
             self.rightClicked(event)
         else:
             self.leftClicked(event)
@@ -236,7 +236,7 @@ class TwwMapTool(QgsMapTool):
             for action in sorted(actions.keys(), key=lambda o: o.text()):
                 menu.addAction(action)
 
-            clicked_action = menu.exec_(self.canvas.mapToGlobal(event.pos()))
+            clicked_action = menu.exec(self.canvas.mapToGlobal(event.pos()))
 
             if clicked_action is not None:
                 return actions[clicked_action]
@@ -257,6 +257,7 @@ class TwwProfileMapTool(TwwMapTool):
 
     selectedPathPoints = []
     pathPolyline = []
+    _segment_history = []  # list of (vertices, edges) for undo
 
     def __init__(self, canvas, button, network_analyzer):
         TwwMapTool.__init__(self, canvas, button, network_analyzer)
@@ -306,12 +307,13 @@ class TwwProfileMapTool(TwwMapTool):
         @param start_point: The id of the start point of the path
         @param end_point:   The id of the end point of the path
         """
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         # try:
-        (vertices, edges) = self.network_analyzer.shortestPath(start_point, end_point)
+        vertices, edges = self.network_analyzer.shortestPath(start_point, end_point)
+        if len(vertices) > 0:
+            # Save segment for undo before appending
+            self._segment_history.append((vertices, edges))
         self.appendProfile(vertices, edges)
-        #        except:
-        #            pass
         QApplication.restoreOverrideCursor()
         if len(vertices) > 0:
             return True
@@ -419,10 +421,20 @@ class TwwProfileMapTool(TwwMapTool):
                 self.segmentOffset = to_offset
 
             # Create rubberband geometry
+            # Reset pathPolyline for this segment (but keep previous segments if this is a continuation)
+            segment_polyline = []
             for feat_id in edge_ids:
-                self.pathPolyline.extend(edge_features[feat_id].geometry().asPolyline())
+                segment_polyline.extend(edge_features[feat_id].geometry().asPolyline())
+            
+            # Add this segment to the overall path
+            self.pathPolyline.extend(segment_polyline)
 
             self.rubberBand.addGeometry(QgsGeometry.fromPolylineXY(self.pathPolyline), node_layer)
+            
+            # Debug output
+            self.logger.debug(f"appendProfile: pathPolyline now has {len(self.pathPolyline)} points")
+            self.logger.debug(f"appendProfile: Emitting profileChanged signal with {len(self.profile.getElements())} elements")
+            
             self.profileChanged.emit(self.profile)
             return True
         else:
@@ -443,17 +455,65 @@ class TwwProfileMapTool(TwwMapTool):
             )
             self.rbHelperLine.addPoint(mouse_pos)
 
+    def undoLastSegment(self):
+        """
+        Undo the last profile segment (Ctrl+Z).
+        Removes the last segment and rebuilds the profile from remaining history.
+        Reverts selectedPathPoints by one so the user can re-click a different node.
+        """
+        if not self._segment_history:
+            return
+
+        # Remove last segment
+        self._segment_history.pop()
+
+        # Revert selectedPathPoints by one (Option A: keep previous endpoint)
+        if len(self.selectedPathPoints) > 1:
+            self.selectedPathPoints.pop()
+
+        # Rebuild profile from remaining history
+        self.profile.reset()
+        self.pathPolyline = []
+        self.segmentOffset = 0
+        self.rubberBand.reset()
+
+        if self._segment_history:
+            for vertices, edges in self._segment_history:
+                self.appendProfile(vertices, edges)
+        else:
+            # No segments left, emit empty profile to clear canvas
+            self.profileChanged.emit(self.profile)
+
+    def keyPressEvent(self, event):
+        """
+        Handle key press events. Ctrl+Z triggers undo.
+        """
+        if event.key() == Qt.Key.Key_Z and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.undoLastSegment()
+        else:
+            super().keyPressEvent(event)
+
     def rightClicked(self, _):
         """
         Cancel any ongoing path selection
+        
+        First right-click: Cancel mouse attachment (ongoing selection)
+        Second right-click: Clear the selected path line
 
         @param event: The mouse event with coordinates and all
         """
-        self.selectedPathPoints = []
-        self.pathPolyline = []
-        self.rbHelperLine.reset()
-        self.profile.reset()
-        self.segmentOffset = 0
+        # If there's an ongoing selection, just cancel it (first right-click)
+        if self.selectedPathPoints:
+            self.selectedPathPoints = []
+            self.rbHelperLine.reset()
+        else:
+            # No ongoing selection, clear everything (second right-click)
+            self.pathPolyline = []
+            self.rubberBand.reset()  # Clear the path visualization
+            self.rbHelperLine.reset()
+            self.profile.reset()
+            self.segmentOffset = 0
+            self._segment_history = []
 
     def leftClicked(self, event):
         """
@@ -472,6 +532,12 @@ class TwwProfileMapTool(TwwMapTool):
                     msg = self.msgBar.createMessage("No path found")
                     self.msgBar.pushWidget(msg, Qgis.Info)
             else:
+                # Starting a new path - clear old accumulated data
+                self.pathPolyline = []
+                self.rubberBand.reset()
+                self.profile.reset()
+                self.segmentOffset = 0
+                self._segment_history = []
                 self.selectedPathPoints.append((match.featureId(), QgsPointXY(match.point())))
 
 
@@ -500,7 +566,7 @@ class TwwTreeMapTool(TwwMapTool):
         Does the work. Tracks the graph up- or downstream.
         :param node_id: The node from which the tracking should be started
         """
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         upstream = self.direction == "upstream"
 
         self.rubberBand.reset()
@@ -745,7 +811,7 @@ class TwwMapToolConnectNetworkElements(QgsMapTool):
 
         self.action.setChecked(True)
 
-        self.iface.mapCanvas().setCursor(QCursor(Qt.CrossCursor))
+        self.iface.mapCanvas().setCursor(QCursor(Qt.CursorShape.CrossCursor))
 
     def setSnapLayers(self, snapper, layers):
         config = QgsSnappingConfig()
@@ -816,7 +882,7 @@ class TwwMapToolConnectNetworkElements(QgsMapTool):
         """
         On a click update the rubberbands and the snapping results if it's a left click. Reset if it's a right click.
         """
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             if self.snapresult.isValid():
                 if self.source_match:
                     self.connect_features(self.source_match, self.snapresult)
@@ -888,7 +954,9 @@ class TwwMapToolConnectNetworkElements(QgsMapTool):
             properties.append(cbx)
             dlg.layout().addWidget(cbx)
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         dlg.layout().addWidget(btn_box)
         btn_box.accepted.connect(dlg.accept)
         btn_box.rejected.connect(dlg.reject)
@@ -896,7 +964,7 @@ class TwwMapToolConnectNetworkElements(QgsMapTool):
         source_feature = self.get_feature_for_match(source)
         target_feature = self.get_feature_for_match(target)
 
-        if dlg.exec_():
+        if dlg.exec():
             for cbx in properties:
                 if cbx.isChecked():
                     source_feature[cbx.objectName()] = target_feature["obj_id"]

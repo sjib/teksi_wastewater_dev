@@ -87,7 +87,38 @@
         </item>
         <item row="0" column="2">
          <layout class="QGridLayout" name="gridLayout">
+          <item row="1" column="0">
+           <widget class="QToolButton" name="selectButton">
+            <property name="text">
+             <string>Select current path</string>
+            </property>
+            <property name="popupMode">
+             <enum>QToolButton::MenuButtonPopup</enum>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QPushButton" name="performCalculationButton">
+            <property name="text">
+             <string>Perform calculation</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="0">
+           <widget class="QPushButton" name="clearCanvasButton">
+            <property name="text">
+             <string>Clear Canvas</string>
+            </property>
+           </widget>
+          </item>
           <item row="4" column="0">
+           <widget class="QPushButton" name="printButton">
+            <property name="text">
+             <string>Print</string>
+            </property>
+           </widget>
+          </item>
+          <item row="5" column="0">
            <spacer name="verticalSpacer">
             <property name="orientation">
              <enum>Qt::Vertical</enum>
@@ -99,30 +130,6 @@
              </size>
             </property>
            </spacer>
-          </item>
-          <item row="2" column="0">
-           <widget class="QPushButton" name="performCalculationButton">
-            <property name="text">
-             <string>Perform calculation</string>
-            </property>
-           </widget>
-          </item>
-          <item row="1" column="0">
-           <widget class="QToolButton" name="selectButton">
-            <property name="text">
-             <string>Select current path</string>
-            </property>
-            <property name="popupMode">
-             <enum>QToolButton::MenuButtonPopup</enum>
-            </property>
-           </widget>
-          </item>
-          <item row="3" column="0">
-           <widget class="QPushButton" name="printButton">
-            <property name="text">
-             <string>Print</string>
-            </property>
-           </widget>
           </item>
          </layout>
         </item>

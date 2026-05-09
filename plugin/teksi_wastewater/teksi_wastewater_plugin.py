@@ -28,8 +28,8 @@ import logging
 import os
 import shutil
 
-from qgis.core import Qgis, QgsApplication
-from qgis.PyQt.QtCore import QLocale, QSettings, Qt
+from qgis.core import Qgis, QgsApplication, QgsProject
+from qgis.PyQt.QtCore import QLocale, QSettings, Qt, QTimer
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QApplication, QMessageBox, QToolBar
 from qgis.utils import qgsfunction
@@ -38,18 +38,25 @@ try:
     from .gui.twwplotsvgwidget import TwwPlotSVGWidget
 except ImportError:
     TwwPlotSVGWidget = None
+
+# Import the new elevation profile widget
+from .gui.twwelevationprofilewidget import TwwElevationProfileWidget
+
+
 from .gui.twwprofiledockwidget import TwwProfileDockWidget
+from .gui.twwselectionextenderwidget import TwwSelectionExtenderWidget
 from .gui.twwsettingsdialog import TwwSettingsDialog
 from .gui.twwwizard import TwwWizard
 from .libs.modelbaker.iliwrapper.ili2dbutils import JavaNotFoundError
 from .processing_provider.provider import TwwProcessingProvider
-from .tools.twwmaptools import TwwMapToolConnectNetworkElements, TwwTreeMapTool
+from .tools.twwmaptools import TwwMapToolConnectNetworkElements, TwwTreeMapTool,TwwProfileMapTool
 from .tools.twwnetwork import TwwGraphManager
+from .tools.twwselectionextender import TwwSelectionExtender
 from .utils.database_utils import DatabaseUtils
 from .utils.plugin_utils import plugin_root_path
 from .utils.qt_utils import OverrideCursor
 from .utils.translation import setup_i18n
-from .utils.twwlayermanager import TwwLayerManager, TwwLayerNotifier
+from .utils.twwlayermanager import TwwLayerManager
 from .utils.twwlogging import TwwQgsLogHandler
 
 LOGFORMAT = "%(asctime)s:%(levelname)s:%(module)s:%(message)s"
@@ -154,7 +161,7 @@ class TeksiWastewaterPlugin:
 
         fp = os.path.join(os.path.abspath(os.path.dirname(__file__)), "metadata.txt")
 
-        ini_text = QSettings(fp, QSettings.IniFormat)
+        ini_text = QSettings(fp, QSettings.Format.IniFormat)
         verno = ini_text.value("version")
 
         self.logger.info("TEKSI Wastewater plugin version " + verno + " started")
@@ -163,26 +170,19 @@ class TeksiWastewaterPlugin:
         """
         Called to setup the plugin GUI
         """
-        self.network_layer_notifier = TwwLayerNotifier(
-            self.iface.mainWindow(),
-            ["vw_network_node", "vw_network_segment"],
-        )
-        self.vw_tww_layer_notifier = TwwLayerNotifier(
-            self.iface.mainWindow(),
-            ["vw_tww_wastewater_structure"],
-        )
+
         self.toolbarButtons = []
 
         # Create toolbar button
-        # self.profileAction = QAction(
-        #     QIcon(os.path.join(plugin_root_path(), "icons/wastewater-profile.svg")),
-        #     self.tr("Profile"),
-        #     self.iface.mainWindow(),
-        # )
-        # self.profileAction.setWhatsThis(self.tr("Reach trace"))
-        # self.profileAction.setEnabled(False)
-        # self.profileAction.setCheckable(True)
-        # self.profileAction.triggered.connect(self.profileToolClicked)
+        self.profileAction = QAction(
+            QIcon(os.path.join(plugin_root_path(), "icons/wastewater-profile.svg")),
+            self.tr("Profile"),
+            self.iface.mainWindow(),
+        )
+        self.profileAction.setWhatsThis(self.tr("Reach trace"))
+        self.profileAction.setEnabled(False)
+        self.profileAction.setCheckable(True)
+        self.profileAction.triggered.connect(self.profileToolClicked)
 
         self.downstreamAction = QAction(
             QIcon(os.path.join(plugin_root_path(), "icons/wastewater-downstream.svg")),
@@ -288,7 +288,7 @@ class TeksiWastewaterPlugin:
         # Add toolbar button and menu item
         self.toolbar = QToolBar(self.tr("TEKSI Wastewater"))
         self.toolbar.setObjectName(self.toolbar.windowTitle())
-        # self.toolbar.addAction(self.profileAction)
+        self.toolbar.addAction(self.profileAction)
         self.toolbar.addAction(self.upstreamAction)
         self.toolbar.addAction(self.downstreamAction)
         self.toolbar.addAction(self.wizardAction)
@@ -296,7 +296,7 @@ class TeksiWastewaterPlugin:
         self.toolbar.addAction(self.connectNetworkElementsAction)
 
         self.main_menu_name = "TEKSI &Wastewater"
-        # self.iface.addPluginToMenu(self.menu, self.profileAction)
+        self.iface.addPluginToMenu(self.main_menu_name, self.profileAction)
         self.iface.addPluginToMenu(self.main_menu_name, self.updateSymbologyAction)
         self.iface.addPluginToMenu(self.main_menu_name, self.validityCheckAction)
         self.iface.addPluginToMenu(self.main_menu_name, self.enableSymbologyTriggersAction)
@@ -313,7 +313,7 @@ class TeksiWastewaterPlugin:
         self.iface.addToolBar(self.toolbar)
 
         # Local array of buttons to enable / disable based on context
-        # self.toolbarButtons.append(self.profileAction)
+        self.toolbarButtons.append(self.profileAction)
         self.toolbarButtons.append(self.upstreamAction)
         self.toolbarButtons.append(self.downstreamAction)
         self.toolbarButtons.append(self.wizardAction)
@@ -321,20 +321,17 @@ class TeksiWastewaterPlugin:
         self.toolbarButtons.append(self.importAction)
         self.toolbarButtons.append(self.exportAction)
 
-        self.network_layer_notifier.layersAvailable.connect(self.onNetworkLayersAvailable)
-        self.network_layer_notifier.layersUnavailable.connect(self.onNetworkLayersUnavailable)
-
-        self.vw_tww_layer_notifier.layersAvailable.connect(self.onTwwLayersAvailable)
-        self.vw_tww_layer_notifier.layersUnavailable.connect(self.onTwwLayersUnavailable)
+        QgsProject.instance().layerLoaded.connect(self._on_layer_loaded)
+        QgsProject.instance().cleared.connect(self._on_project_cleared)
 
         # Init the object maintaining the network
         self.network_analyzer = TwwGraphManager()
         self.network_analyzer.message_emitted.connect(self.iface.messageBar().pushMessage)
-        # Create the map tool for profile selection
-        # self.profile_tool = TwwProfileMapTool(
-        #    self.iface, self.profileAction, self.network_analyzer
-        # )
-        # self.profile_tool.profileChanged.connect(self.onProfileChanged)
+        #Create the map tool for profile selection
+        self.profile_tool = TwwProfileMapTool(
+           self.iface, self.profileAction, self.network_analyzer
+        )
+        self.profile_tool.profileChanged.connect(self.onProfileChanged)
 
         self.upstream_tree_tool = TwwTreeMapTool(
             self.iface, self.upstreamAction, self.network_analyzer
@@ -354,7 +351,22 @@ class TeksiWastewaterPlugin:
         self.processing_provider = TwwProcessingProvider()
         QgsApplication.processingRegistry().addProvider(self.processing_provider)
 
-        self.network_layer_notifier.layersAdded([])
+        # Handle the case where a project is already open when the plugin loads
+        self._check_tww_layers()
+
+        self.selectionExtenderWidget = None
+        self.selectionExtenderAction = QAction(
+            QIcon(os.path.join(plugin_root_path(), "icons/selection-extender.svg")),
+            self.tr("Extend selection"),
+            self.iface.mainWindow(),
+        )
+        self.selectionExtenderAction.setEnabled(False)
+        self.selectionExtenderAction.setCheckable(True)
+        self.selectionExtenderAction.toggled.connect(self.toggleSelectionExtenderWidget)
+
+        self.toolbar.addAction(self.selectionExtenderAction)
+        self.toolbarButtons.append(self.selectionExtenderAction)
+        self.selectionExtenderController = TwwSelectionExtender(self.iface)
 
     def tww_validity_check_startup(self):
         messages = []
@@ -430,12 +442,13 @@ class TeksiWastewaterPlugin:
         """
         Called when unloading
         """
-        # self.toolbar.removeAction(self.profileAction)
+        self.toolbar.removeAction(self.profileAction)
         self.toolbar.removeAction(self.upstreamAction)
         self.toolbar.removeAction(self.downstreamAction)
         self.toolbar.removeAction(self.wizardAction)
         self.toolbar.removeAction(self.refreshNetworkTopologyAction)
         self.toolbar.removeAction(self.connectNetworkElementsAction)
+        self.toolbar.removeAction(self.selectionExtenderAction)
 
         if self.importAction in self.toolbar.actions():
             self.toolbar.removeAction(self.importAction)
@@ -444,7 +457,7 @@ class TeksiWastewaterPlugin:
 
         self.toolbar.deleteLater()
 
-        # self.iface.removePluginMenu(self.menu, self.profileAction)
+        self.iface.removePluginMenu(self.main_menu_name, self.profileAction)
         self.iface.removePluginMenu(self.main_menu_name, self.updateSymbologyAction)
         self.iface.removePluginMenu(self.main_menu_name, self.validityCheckAction)
         self.iface.removePluginMenu(self.main_menu_name, self.settingsAction)
@@ -454,32 +467,457 @@ class TeksiWastewaterPlugin:
 
         QgsApplication.processingRegistry().removeProvider(self.processing_provider)
 
-    def onNetworkLayersAvailable(self, layers):
+        if self.selectionExtenderWidget is not None:
+            self.iface.removeDockWidget(self.selectionExtenderWidget)
+            self.selectionExtenderWidget.deleteLater()
+            self.selectionExtenderWidget = None
+
+    def _on_layer_loaded(self, i, n):
+        """
+        Called during project loading for each layer. When the last layer is loaded,
+        schedule a deferred check so all C++ layer objects are fully constructed.
+        """
+        if i == n:
+            QTimer.singleShot(0, self._check_tww_layers)
+
+    def _on_project_cleared(self):
+        self._on_tww_project_unavailable()
+
+    def _check_tww_layers(self):
+        """
+        Checks whether a TWW project is available (i.e. some required TWW layers are present in the current project).
+        If so, enables the plugin.
+        """
+        required_layers = ["vw_network_node", "vw_network_segment", "vw_tww_wastewater_structure"]
+        all_layer_ids = list(QgsProject.instance().mapLayers().keys())
+
+        for tww_id in required_layers:
+            if not any(lyr_id.startswith(tww_id) for lyr_id in all_layer_ids):
+                return
+
+        self._on_tww_project_available()
+
+    def _on_tww_project_available(self):
+        network_segment = TwwLayerManager.layer("vw_network_segment")
+        network_node = TwwLayerManager.layer("vw_network_node")
+
         self.connectNetworkElementsAction.setEnabled(True)
-        self.network_analyzer.setReachLayer(layers["vw_network_segment"])
-        self.network_analyzer.setNodeLayer(layers["vw_network_node"])
+        self.network_analyzer.setLayers(network_segment, network_node)
 
-    def onNetworkLayersUnavailable(self):
-        self.connectNetworkElementsAction.setEnabled(False)
-
-    def onTwwLayersAvailable(self):
         for b in self.toolbarButtons:
             b.setEnabled(True)
 
         self._configure_database_connection_config_from_tww_layer()
         self.tww_validity_check_startup()
 
-    def onTwwLayersUnavailable(self):
+    def _on_tww_project_unavailable(self):
+        self.connectNetworkElementsAction.setEnabled(False)
+        self.network_analyzer.setLayers(None, None)
+
         for b in self.toolbarButtons:
             b.setEnabled(False)
+
 
     def profileToolClicked(self):
         """
         Is executed when the profile button is clicked
         """
+        if not self.profileAction.isChecked():
+            # Button was unchecked — close the dock
+            if self.profile_dock is not None:
+                self.profile_dock.close()
+            return
+
         self.openDock()
         # Set the profile map tool
-        # self.profile_tool.setActive()
+        self.profile_tool.setActive()
+
+    def profileToolClicked2(self):
+        """
+        Is executed when the profile button is clicked
+        """
+        
+        action = self.iface.mainWindow().findChild(QAction, 'mActionElevationProfile')
+        if action:
+            action.trigger()
+            
+            # Configure elevation profile after it opens
+            from qgis.PyQt.QtCore import QTimer
+            from qgis.PyQt.QtWidgets import QDockWidget, QToolButton
+            from qgis.core import QgsVectorLayerElevationProperties, QgsProject
+            
+            def configureElevationProfile(retry_count=0):
+                max_retries = 5
+                main_window = self.iface.mainWindow()
+                
+                # Find elevation profile dock widget
+                dock_widgets = main_window.findChildren(QDockWidget)
+                elevation_dock = None
+                for dock in dock_widgets:
+                    if dock.isVisible():
+                        title_lower = dock.windowTitle().lower()
+                        if 'elevation' in title_lower or 'profile' in title_lower or 'elevationprofile' in dock.objectName().lower():
+                            elevation_dock = dock
+                            break
+                
+                if not elevation_dock and retry_count < max_retries:
+                    # Retry after a longer delay
+                    QTimer.singleShot(500, lambda: configureElevationProfile(retry_count + 1))
+                    return
+                
+                if not elevation_dock:
+                    self.logger.warning("Elevation profile dock widget not found")
+                    return
+                
+                self.logger.debug(f"Found elevation profile dock: {elevation_dock.windowTitle()}")
+                
+                # 1. Find and trigger capture curve tool
+                # Try multiple ways to find the capture curve action
+                capture_action = None
+                
+                # Method 1: Search in main window
+                all_actions = main_window.findChildren(QAction)
+                for act in all_actions:
+                    obj_name = act.objectName().lower()
+                    text = act.text().lower()
+                    if 'capture' in obj_name and 'curve' in obj_name:
+                        capture_action = act
+                        self.logger.debug(f"Found capture curve action by object name: {act.objectName()}")
+                        break
+                    elif 'capture' in text and 'curve' in text:
+                        capture_action = act
+                        self.logger.debug(f"Found capture curve action by text: {act.text()}")
+                        break
+                
+                # Method 2: Search in dock widget
+                if not capture_action:
+                    dock_actions = elevation_dock.findChildren(QAction)
+                    for act in dock_actions:
+                        obj_name = act.objectName().lower()
+                        text = act.text().lower()
+                        if 'capture' in obj_name and 'curve' in obj_name:
+                            capture_action = act
+                            self.logger.debug(f"Found capture curve action in dock by object name: {act.objectName()}")
+                            break
+                        elif 'capture' in text and 'curve' in text:
+                            capture_action = act
+                            self.logger.debug(f"Found capture curve action in dock by text: {act.text()}")
+                            break
+                
+                # Method 3: Search for tool buttons in dock
+                if not capture_action:
+                    tool_buttons = elevation_dock.findChildren(QToolButton)
+                    for btn in tool_buttons:
+                        default_action = btn.defaultAction()
+                        if default_action:
+                            obj_name = default_action.objectName().lower()
+                            text = default_action.text().lower()
+                            if 'capture' in obj_name and 'curve' in obj_name:
+                                capture_action = default_action
+                                self.logger.debug(f"Found capture curve action in tool button: {default_action.objectName()}")
+                                break
+                            elif 'capture' in text and 'curve' in text:
+                                capture_action = default_action
+                                self.logger.debug(f"Found capture curve action in tool button by text: {default_action.text()}")
+                                break
+                
+                if capture_action:
+                    capture_action.trigger()
+                    self.logger.info("Capture curve tool activated")
+                else:
+                    self.logger.warning("Could not find capture curve action")
+                
+                # 2. Configure layers in Elevation Profile window
+                layer_names = ['vw_cover', 'vw_wastewater_node', 'vw_tww_reach', 'vw_change_points']
+                
+                # Find QgsElevationProfileCanvas and layer list widget in the elevation profile dock widget
+                from qgis.gui import QgsElevationProfileCanvas
+                from qgis.core import QgsProject
+                from qgis.PyQt.QtWidgets import QTreeWidget, QTreeWidgetItem, QListWidget, QListWidgetItem
+                from qgis.PyQt.QtCore import Qt
+                
+                elevation_canvas = None
+                # Search for QgsElevationProfileCanvas in the dock widget
+                canvas_widgets = elevation_dock.findChildren(QgsElevationProfileCanvas)
+                if canvas_widgets:
+                    elevation_canvas = canvas_widgets[0]
+                    self.logger.debug("Found QgsElevationProfileCanvas in elevation profile dock")
+                
+                # Try to find layer list widget (could be QTreeWidget or QListWidget)
+                layer_tree_widget = None
+                tree_widgets = elevation_dock.findChildren(QTreeWidget)
+                for tree in tree_widgets:
+                    # Check if this looks like a layer list (has items or specific object name)
+                    if tree.objectName() and ('layer' in tree.objectName().lower() or 'tree' in tree.objectName().lower()):
+                        layer_tree_widget = tree
+                        self.logger.debug(f"Found layer tree widget: {tree.objectName()}")
+                        break
+                    elif tree.topLevelItemCount() > 0:
+                        # If it has items, it might be the layer list
+                        layer_tree_widget = tree
+                        self.logger.debug(f"Found tree widget with items: {tree.objectName()}")
+                        break
+                
+                # Collect layers to enable
+                layers_to_enable = []
+                for layer_name in layer_names:
+                    layer = TwwLayerManager.layer(layer_name)
+                    if not layer:
+                        self.logger.debug(f"Layer {layer_name} not found, skipping")
+                        continue
+                    layers_to_enable.append(layer)
+                    self.logger.debug(f"Found layer: {layer_name} (ID: {layer.id()})")
+                
+                # Enable layers in the layer list widget
+                if layer_tree_widget and layers_to_enable:
+                    try:
+                        # Helper function to recursively check items
+                        def check_items_recursive(item, layers_to_check):
+                            matched = False
+                            if item:
+                                # Try to find layer ID in item data or text
+                                item_text = item.text(0) if item.columnCount() > 0 else ""
+                                
+                                # Check if this item corresponds to one of our layers
+                                for layer in layers_to_check:
+                                    layer_id = layer.id()
+                                    layer_name_check = layer.name()
+                                    
+                                    # Check if item text contains layer name or ID
+                                    if layer_name_check in item_text or layer_id in item_text:
+                                        # Set item to checked
+                                        item.setCheckState(0, Qt.CheckState.Checked)
+                                        self.logger.info(f"Checked layer {layer_name_check} in elevation profile layer list")
+                                        
+                                        # Expand parent if it's a tree
+                                        parent = item.parent()
+                                        if parent:
+                                            parent.setExpanded(True)
+                                        
+                                        matched = True
+                                        break
+                                    
+                                    # Also try checking by data (layer might be stored as data)
+                                    for col in range(item.columnCount()):
+                                        item_data = item.data(col, Qt.ItemDataRole.UserRole)
+                                        if item_data:
+                                            item_data_str = str(item_data)
+                                            if layer_id in item_data_str or layer_name_check in item_data_str:
+                                                item.setCheckState(0, Qt.CheckState.Checked)
+                                                self.logger.info(f"Checked layer {layer_name_check} in elevation profile layer list (by data)")
+                                                
+                                                # Expand parent
+                                                parent = item.parent()
+                                                if parent:
+                                                    parent.setExpanded(True)
+                                                
+                                                matched = True
+                                                break
+                                
+                                # Recursively check children
+                                for i in range(item.childCount()):
+                                    child = item.child(i)
+                                    if check_items_recursive(child, layers_to_check):
+                                        # Expand parent if child was matched
+                                        item.setExpanded(True)
+                                        matched = True
+                            
+                            return matched
+                        
+                        # Check top-level items recursively
+                        for i in range(layer_tree_widget.topLevelItemCount()):
+                            item = layer_tree_widget.topLevelItem(i)
+                            check_items_recursive(item, layers_to_enable)
+                            
+                    except Exception as e:
+                        self.logger.warning(f"Failed to enable layers in layer list widget: {e}")
+                        import traceback
+                        self.logger.debug(traceback.format_exc())
+                
+                # Set layers to elevation profile canvas if found
+                if elevation_canvas and layers_to_enable:
+                    try:
+                        # Get current layers
+                        current_layers = []
+                        if hasattr(elevation_canvas, 'layers'):
+                            current_layers = list(elevation_canvas.layers()) if callable(elevation_canvas.layers) else list(elevation_canvas.layers)
+                        
+                        # Add our layers to the canvas
+                        if hasattr(elevation_canvas, 'setLayers'):
+                            # Combine current layers with new layers (avoid duplicates)
+                            all_layers = list(current_layers)
+                            for layer in layers_to_enable:
+                                if layer not in all_layers:
+                                    all_layers.append(layer)
+                            elevation_canvas.setLayers(all_layers)
+                            self.logger.info(f"Set {len(all_layers)} layers to elevation profile canvas")
+                        else:
+                            self.logger.warning("QgsElevationProfileCanvas does not have setLayers method")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to set layers to elevation canvas: {e}")
+                        import traceback
+                        self.logger.debug(traceback.format_exc())
+                
+                # Configure elevation properties for each layer
+                for layer_name in layer_names:
+                    layer = TwwLayerManager.layer(layer_name)
+                    if not layer:
+                        continue
+                    
+                    self.logger.debug(f"Configuring elevation properties for layer: {layer_name}")
+                    
+                    # Get elevation properties
+                    elevation_props = layer.elevationProperties()
+                    if not elevation_props:
+                        self.logger.warning(f"Layer {layer_name} has no elevation properties, skipping")
+                        continue
+                    
+                    # Log elevation properties type and available methods
+                    props_type = type(elevation_props).__name__
+                    self.logger.debug(f"Layer {layer_name} elevation properties type: {props_type}")
+                    
+                    # Enable elevation - try different methods
+                    try:
+                        # Method 1: Try isEnabled/setEnabled
+                        if hasattr(elevation_props, 'isEnabled') and hasattr(elevation_props, 'setEnabled'):
+                            if not elevation_props.isEnabled():
+                                elevation_props.setEnabled(True)
+                                self.logger.info(f"Enabled elevation for layer {layer_name} (method)")
+                            else:
+                                self.logger.debug(f"Elevation already enabled for layer {layer_name}")
+                        # Method 2: Try enabled property
+                        elif hasattr(elevation_props, 'enabled'):
+                            if not elevation_props.enabled:
+                                elevation_props.enabled = True
+                                self.logger.info(f"Enabled elevation for layer {layer_name} (property)")
+                            else:
+                                self.logger.debug(f"Elevation already enabled for layer {layer_name}")
+                        # Method 3: Try isActive/setActive
+                        elif hasattr(elevation_props, 'isActive') and hasattr(elevation_props, 'setActive'):
+                            if not elevation_props.isActive():
+                                elevation_props.setActive(True)
+                                self.logger.info(f"Activated elevation for layer {layer_name}")
+                            else:
+                                self.logger.debug(f"Elevation already active for layer {layer_name}")
+                        else:
+                            # Log available attributes for debugging
+                            available_attrs = [attr for attr in dir(elevation_props) if not attr.startswith('_') and not callable(getattr(elevation_props, attr, None))]
+                            available_methods = [attr for attr in dir(elevation_props) if not attr.startswith('_') and callable(getattr(elevation_props, attr, None))]
+                            self.logger.debug(f"Available elevation properties attributes: {available_attrs[:10]}")
+                            self.logger.debug(f"Available elevation properties methods: {[m for m in available_methods if 'enable' in m.lower() or 'active' in m.lower()][:10]}")
+                            # Try to enable anyway if it's a vector layer elevation properties
+                            if isinstance(elevation_props, QgsVectorLayerElevationProperties):
+                                # For vector layers, elevation might be enabled by default or need mode setting
+                                self.logger.debug(f"Vector layer elevation properties - checking mode")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to enable elevation for {layer_name}: {e}")
+                        import traceback
+                        self.logger.debug(traceback.format_exc())
+                    
+                    # Set clamping to Absolute
+                    if isinstance(elevation_props, QgsVectorLayerElevationProperties):
+                        try:
+                            # Try different methods to set clamping
+                            clamping_set = False
+                            
+                            # First, check current clamping value and available methods
+                            current_clamping = None
+                            if hasattr(elevation_props, 'clamping'):
+                                try:
+                                    current_clamping = elevation_props.clamping
+                                    self.logger.debug(f"Current clamping value for {layer_name}: {current_clamping}")
+                                except:
+                                    pass
+                            
+                            # Method 1: Try setClamping with enum
+                            if hasattr(elevation_props, 'setClamping'):
+                                try:
+                                    if hasattr(QgsVectorLayerElevationProperties, 'Clamping'):
+                                        clamping_enum = QgsVectorLayerElevationProperties.Clamping
+                                        # Check available enum values
+                                        enum_attrs = [attr for attr in dir(clamping_enum) if not attr.startswith('_')]
+                                        self.logger.debug(f"Available clamping enum values for {layer_name}: {enum_attrs}")
+                                        
+                                        # Try different possible enum values
+                                        if hasattr(clamping_enum, 'Absolute'):
+                                            elevation_props.setClamping(clamping_enum.Absolute)
+                                            clamping_set = True
+                                            self.logger.info(f"Set clamping to Absolute (enum) for layer {layer_name}")
+                                        elif hasattr(clamping_enum, 'AbsoluteClamping'):
+                                            elevation_props.setClamping(clamping_enum.AbsoluteClamping)
+                                            clamping_set = True
+                                            self.logger.info(f"Set clamping to AbsoluteClamping (enum) for layer {layer_name}")
+                                        elif 'Absolute' in enum_attrs:
+                                            # Try to get the enum value dynamically
+                                            abs_value = getattr(clamping_enum, 'Absolute', None)
+                                            if abs_value is not None:
+                                                elevation_props.setClamping(abs_value)
+                                                clamping_set = True
+                                                self.logger.info(f"Set clamping to Absolute (dynamic enum) for layer {layer_name}")
+                                        else:
+                                            # Try numeric value 0 (Absolute is typically 0)
+                                            elevation_props.setClamping(0)
+                                            clamping_set = True
+                                            self.logger.info(f"Set clamping to 0 (Absolute) for layer {layer_name}")
+                                except Exception as e1:
+                                    self.logger.debug(f"Method 1 (setClamping with enum) failed for {layer_name}: {e1}")
+                                    # Try numeric value directly
+                                    try:
+                                        elevation_props.setClamping(0)
+                                        clamping_set = True
+                                        self.logger.info(f"Set clamping to 0 (Absolute) for layer {layer_name} (direct numeric)")
+                                    except Exception as e2:
+                                        self.logger.debug(f"Method 1 (direct numeric) also failed for {layer_name}: {e2}")
+                            
+                            # Method 2: Try clamping property
+                            if not clamping_set and hasattr(elevation_props, 'clamping'):
+                                try:
+                                    if hasattr(QgsVectorLayerElevationProperties, 'Clamping'):
+                                        clamping_enum = QgsVectorLayerElevationProperties.Clamping
+                                        if hasattr(clamping_enum, 'Absolute'):
+                                            elevation_props.clamping = clamping_enum.Absolute
+                                            clamping_set = True
+                                            self.logger.info(f"Set clamping property to Absolute for layer {layer_name}")
+                                        else:
+                                            elevation_props.clamping = 0
+                                            clamping_set = True
+                                            self.logger.info(f"Set clamping property to 0 (Absolute) for layer {layer_name}")
+                                    else:
+                                        elevation_props.clamping = 0
+                                        clamping_set = True
+                                        self.logger.info(f"Set clamping property to 0 (Absolute) for layer {layer_name} (direct)")
+                                except Exception as e2:
+                                    self.logger.debug(f"Method 2 (clamping property) failed for {layer_name}: {e2}")
+                            
+                            # Verify clamping was set
+                            if clamping_set:
+                                try:
+                                    if hasattr(elevation_props, 'clamping'):
+                                        final_clamping = elevation_props.clamping
+                                        self.logger.debug(f"Verified clamping value for {layer_name}: {final_clamping}")
+                                except:
+                                    pass
+                            else:
+                                # Log available methods for debugging
+                                available_methods = [attr for attr in dir(elevation_props) if not attr.startswith('_') and 'clamp' in attr.lower()]
+                                self.logger.warning(f"Could not set clamping for layer {layer_name} - available clamping methods: {available_methods}")
+                                
+                        except Exception as e:
+                            self.logger.warning(f"Failed to configure clamping for {layer_name}: {e}")
+                            import traceback
+                            self.logger.debug(traceback.format_exc())
+                    
+                    # Trigger layer repaint and commit changes
+                    try:
+                        layer.triggerRepaint()
+                        # Also try to commit style changes
+                        if hasattr(layer, 'styleManager'):
+                            layer.styleManager().saveCurrentStyle()
+                    except Exception as e:
+                        self.logger.debug(f"Failed to trigger repaint for {layer_name}: {e}")
+            
+            # Use QTimer with longer delay and retry mechanism
+            QTimer.singleShot(500, lambda: configureElevationProfile(0))
 
     def upstreamToolClicked(self):
         """
@@ -506,7 +944,7 @@ class TeksiWastewaterPlugin:
         if not self.wizarddock:
             self.wizarddock = TwwWizard(self.iface.mainWindow(), self.iface)
         self.logger.debug("Opening Wizard")
-        self.iface.addDockWidget(Qt.LeftDockWidgetArea, self.wizarddock)
+        self.iface.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.wizarddock)
         self.wizarddock.show()
 
     def connectNetworkElements(self, checked):
@@ -527,7 +965,18 @@ class TeksiWastewaterPlugin:
             self.profile_dock.showIt()
 
             self.plotWidget = None
-            if TwwPlotSVGWidget is not None:
+            # Use the new Elevation Profile widget if available
+            if TwwElevationProfileWidget is not None:
+                print("*** Using NEW TwwElevationProfileWidget (QGIS Elevation Profile Canvas) ***")
+                self.plotWidget = TwwElevationProfileWidget(self.profile_dock, self.network_analyzer)
+                # Note: The new widget doesn't have mouseOver signals (those were for the old SVG implementation)
+                # TODO: Add interactivity features if needed in the future
+                self.profile_dock.addPlotWidget(self.plotWidget)
+                self.profile_dock.setTree(self.nodes, self.edges)
+            elif TwwPlotSVGWidget is not None:
+                # Fallback to old widget if new one is not available
+                #self.logger.info("Using OLD TwwPlotSVGWidget (QtWebKit fallback)")
+                print("*** Using OLD TwwPlotSVGWidget (QtWebKit fallback) ***")
                 self.plotWidget = TwwPlotSVGWidget(self.profile_dock, self.network_analyzer)
                 self.plotWidget.specialStructureMouseOver.connect(self.highlightProfileElement)
                 self.plotWidget.specialStructureMouseOut.connect(self.unhighlightProfileElement)
@@ -541,6 +990,25 @@ class TeksiWastewaterPlugin:
         Gets called when the dock is closed
         All the cleanup of the dock has to be done here
         """
+        # Deactivate profile map tool and restore previous tool
+        if hasattr(self, 'profile_tool') and self.profile_tool:
+            canvas = self.iface.mapCanvas()
+            # Save extent before cleanup to prevent zoom caused by rubberBand.reset()
+            saved_extent = canvas.extent()
+
+            if self.profile_tool.saveTool:
+                canvas.setMapTool(self.profile_tool.saveTool)
+            else:
+                canvas.unsetMapTool(self.profile_tool)
+
+            # Restore the original extent to prevent unwanted zoom
+            canvas.setExtent(saved_extent)
+
+        # Clear elevation profile widget highlight
+        if self.plotWidget and hasattr(self.plotWidget, '_clearHighlight'):
+            self.plotWidget._clearHighlight()
+
+        self.profileAction.setChecked(False)
         self.profile_dock = None
 
     def onProfileChanged(self, profile):
@@ -551,7 +1019,91 @@ class TeksiWastewaterPlugin:
         self.profile = profile.copy()
 
         if self.plotWidget:
-            self.plotWidget.setProfile(profile)
+            # Only call setProfile if the widget has this method (old SVG widget)
+            if hasattr(self.plotWidget, 'setProfile'):
+                self.plotWidget.setProfile(profile)
+            # For new Elevation Profile widget, convert TwwProfile to QgsGeometry
+            elif hasattr(self.plotWidget, 'setProfileCurve'):
+                from qgis.core import QgsGeometry
+                
+                self.logger.debug(f"onProfileChanged: Received new profile with {len(profile.getElements())} elements")
+                print(f"✓ onProfileChanged: Received new profile with {len(profile.getElements())} elements")
+                
+                # Get geometry directly from profile_tool's pathPolyline
+                # This is already in the correct order (built in appendProfile)
+                if hasattr(self, 'profile_tool') and hasattr(self.profile_tool, 'pathPolyline'):
+                    path_polyline = self.profile_tool.pathPolyline
+                    if path_polyline and len(path_polyline) > 0:
+                        self.logger.debug(f"onProfileChanged: Using profile_tool.pathPolyline with {len(path_polyline)} points")
+                        print(f"✓ Using profile_tool.pathPolyline with {len(path_polyline)} points")
+                        print(f"  First point: {path_polyline[0]}, Last point: {path_polyline[-1]}")
+                        
+                        profile_geometry = QgsGeometry.fromPolylineXY(path_polyline)
+                        if profile_geometry and not profile_geometry.isEmpty():
+                            self.logger.debug(f"onProfileChanged: Calling setProfileCurve with geometry")
+                            print(f"✓ Calling setProfileCurve with geometry")
+                            self.plotWidget.setProfileCurve(profile_geometry)
+                        else:
+                            self.logger.warning("onProfileChanged: Geometry is empty or invalid")
+                            print(f"✗ Geometry is empty or invalid")
+                    else:
+                        self.logger.warning("onProfileChanged: pathPolyline is empty")
+                        print(f"⚠ profile_tool.pathPolyline is empty, trying to build from profile elements")
+                        # Fallback: build from profile elements
+                        self._buildProfileFromElements(profile)
+                else:
+                    self.logger.warning("onProfileChanged: profile_tool or pathPolyline not available")
+                    print(f"⚠ profile_tool.pathPolyline not available, trying to build from profile elements")
+                    # Fallback: build from profile elements
+                    self._buildProfileFromElements(profile)
+    
+    def _buildProfileFromElements(self, profile):
+        """
+        Fallback method to build profile geometry from profile elements.
+        """
+        from qgis.core import QgsGeometry, QgsPointXY
+        
+        reach_elements = [
+            elem for elem in profile.getElements() 
+            if hasattr(elem, 'type') and elem.type == "reach" and hasattr(elem, 'detail_geometry') and elem.detail_geometry
+        ]
+        
+        if reach_elements:
+            self.logger.debug(f"_buildProfileFromElements: Found {len(reach_elements)} reach elements")
+            print(f"  Found {len(reach_elements)} reach elements")
+            
+            # Sort by start offset
+            def get_start_offset(elem):
+                if hasattr(elem, 'reachPoints') and elem.reachPoints:
+                    offsets = [p.get('offset', 0) for p in elem.reachPoints.values() if 'offset' in p]
+                    return min(offsets) if offsets else 0
+                return 0
+            
+            reach_elements_sorted = sorted(reach_elements, key=get_start_offset)
+            
+            points = []
+            for elem in reach_elements_sorted:
+                if elem.detail_geometry:
+                    geom_points = elem.detail_geometry.asPolyline()
+                    if points:
+                        if points[-1] == geom_points[0]:
+                            points.extend(geom_points[1:])
+                        else:
+                            points.extend(geom_points)
+                    else:
+                        points.extend(geom_points)
+            
+            if points:
+                self.logger.debug(f"_buildProfileFromElements: Built polyline with {len(points)} points")
+                print(f"  Built polyline with {len(points)} points")
+                profile_geometry = QgsGeometry.fromPolylineXY(points)
+                self.plotWidget.setProfileCurve(profile_geometry)
+            else:
+                self.logger.warning("_buildProfileFromElements: No points extracted from reach elements")
+                print(f"✗ No points extracted from reach elements")
+        else:
+            self.logger.warning("_buildProfileFromElements: No reach elements found in profile")
+            print(f"✗ No reach elements found in profile")
 
     def onTreeChanged(self, nodes, edges):
         if self.profile_dock:
@@ -569,7 +1121,7 @@ class TeksiWastewaterPlugin:
 
     def updateSymbology(self):
         try:
-            with OverrideCursor(Qt.WaitCursor):
+            with OverrideCursor(Qt.CursorShape.WaitCursor):
                 DatabaseUtils.update_symbology()
             QMessageBox.information(
                 self.iface.mainWindow(),
@@ -586,14 +1138,14 @@ class TeksiWastewaterPlugin:
 
     def showSettings(self):
         settings_dlg = TwwSettingsDialog(self.iface.mainWindow())
-        settings_dlg.exec_()
+        settings_dlg.exec()
 
         self.update_admin_mode()
 
     def about(self):
         from .gui.about_dialog import AboutDialog
 
-        AboutDialog(self.iface.mainWindow()).exec_()
+        AboutDialog(self.iface.mainWindow()).exec()
 
     def actionExportClicked(self):
         if self.interlisImporterExporter is None:
@@ -608,7 +1160,8 @@ class TeksiWastewaterPlugin:
             except ImportError as e:
                 self.iface.messageBar().pushMessage(
                     "Error",
-                    "Could not load Interlis exporter due to unmet dependencies. See logs for more details.",
+                    "Could not load Interlis exporter due to unmet dependencies.",
+                    showMore=f"Error details:\n{str(e)}",
                     level=Qgis.Critical,
                 )
                 self.logger.error(str(e))
@@ -617,7 +1170,8 @@ class TeksiWastewaterPlugin:
             except JavaNotFoundError as e:
                 self.iface.messageBar().pushMessage(
                     "Error",
-                    "Could not load Interlis exporter due to missing Java. See logs for more details.",
+                    "Could not load Interlis exporter due to missing Java.",
+                    showMore=f"Error details:\n{str(e)}",
                     level=Qgis.Critical,
                 )
                 self.logger.error(str(e))
@@ -648,7 +1202,8 @@ class TeksiWastewaterPlugin:
             except ImportError as e:
                 self.iface.messageBar().pushMessage(
                     "Error",
-                    "Could not load Interlis importer due to unmet dependencies. See logs for more details.",
+                    "Could not load Interlis importer due to unmet dependencies.",
+                    showMore=f"Error details:\n{str(e)}",
                     level=Qgis.Critical,
                 )
                 self.logger.error(str(e))
@@ -657,7 +1212,8 @@ class TeksiWastewaterPlugin:
             except JavaNotFoundError as e:
                 self.iface.messageBar().pushMessage(
                     "Error",
-                    "Could not load Interlis importer due to missing Java. See logs for more details.",
+                    "Could not load Interlis importer due to missing Java.",
+                    showMore=f"Error details:\n{str(e)}",
                     level=Qgis.Critical,
                 )
                 self.logger.error(str(e))
@@ -726,3 +1282,34 @@ class TeksiWastewaterPlugin:
 
         self.enableSymbologyTriggersAction.setEnabled(admin_mode)
         self.disableSymbologyTriggersAction.setEnabled(admin_mode)
+
+    def toggleSelectionExtenderWidget(self, checked: bool):
+        if checked:
+            if self.selectionExtenderWidget is None:
+                self.selectionExtenderWidget = TwwSelectionExtenderWidget(
+                    self.iface,
+                    self.iface.mainWindow(),
+                )
+                self.selectionExtenderWidget.setController(self.selectionExtenderController)
+
+                self.iface.addDockWidget(
+                    Qt.DockWidgetArea.RightDockWidgetArea, self.selectionExtenderWidget
+                )
+
+                self.selectionExtenderWidget.visibilityChanged.connect(
+                    self._onSelectionExtenderVisibilityChanged
+                )
+
+            self.selectionExtenderWidget.show()
+            self.selectionExtenderWidget.raise_()
+            self.selectionExtenderWidget.activateWindow()
+
+        else:
+            if self.selectionExtenderWidget is not None:
+                self.selectionExtenderWidget.hide()
+
+    def _onSelectionExtenderVisibilityChanged(self, visible: bool):
+        # escape from loop visibilityChanged <-> toggled
+        self.selectionExtenderAction.blockSignals(True)
+        self.selectionExtenderAction.setChecked(visible)
+        self.selectionExtenderAction.blockSignals(False)

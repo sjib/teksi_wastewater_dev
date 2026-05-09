@@ -59,15 +59,15 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         self.configureSelectionAction = QAction(self.tr("Configure Select"), self.selectButton)
         self.configureSelectionAction.triggered.connect(self.onConfigureSelectAction)
         self.selectButton.addAction(self.configureSelectionAction)
-        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.canvas = canvas
         self.addDockWidget = add_dock_widget
 
         self.plotWidget = None
 
     def showIt(self):
-        # self.setLocation( Qt.BottomDockWidgetArea )
-        self.location = Qt.BottomDockWidgetArea
+        # self.setLocation( Qt.DockWidgetArea.BottomDockWidgetArea )
+        self.location = Qt.DockWidgetArea.BottomDockWidgetArea
         minsize = self.minimumSize()
         maxsize = self.maximumSize()
         self.setMinimumSize(minsize)
@@ -77,6 +77,7 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         self.addDockWidget(self.location, self)
         self.canvas.setRenderFlag(True)
 
+        self.clearCanvasButton.clicked.connect(self.onClearCanvasClicked)
         self.printButton.clicked.connect(self.onPrintButtonClicked)
 
         self.mSliderVerticalExaggeration.valueChanged.connect(self.onVerticalExaggerationChanged)
@@ -98,6 +99,29 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
 
         if self.plotWidget:
             self.plotWidget.changeVerticalExaggeration(ve_val)
+
+    @pyqtSlot()
+    def onClearCanvasClicked(self):
+        """Clear the profile canvas and deselect features on map layers."""
+        # Clear the profile widget (canvas, hover, manhole dashes)
+        if self.plotWidget and hasattr(self.plotWidget, 'clearProfile'):
+            self.plotWidget.clearProfile()
+
+        # Clear stored tree data
+        self.nodes = None
+        self.edges = None
+        self.selectCurrentPathAction.setEnabled(False)
+
+        # Deselect features on all related map layers
+        for layer_name in [
+            "vw_tww_reach",
+            "vw_wastewater_node",
+            "vw_tww_wastewater_structure",
+            "vw_tww_catchment_area",
+        ]:
+            layer = TwwLayerManager.layer(layer_name)
+            if layer:
+                layer.removeSelection()
 
     @pyqtSlot()
     def onPrintButtonClicked(self):
@@ -129,7 +153,9 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         rw_planned_checkbox = QCheckBox(self.tr("Rainwater planned"))
         status, _ = QgsProject.instance().readBoolEntry("Tww", "FollowRainwaterPlanned", True)
         rw_planned_checkbox.setChecked(status)
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         btn_box.accepted.connect(dlg.accept)
         btn_box.rejected.connect(dlg.reject)
         dlg.layout().addWidget(ww_current_checkbox)
@@ -138,7 +164,7 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         dlg.layout().addWidget(rw_planned_checkbox)
         dlg.layout().addWidget(btn_box)
 
-        if dlg.exec_():
+        if dlg.exec():
             QgsProject.instance().writeEntry(
                 "Tww", "FollowWastewaterCurrent", ww_current_checkbox.isChecked()
             )
@@ -230,3 +256,7 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         self.nodes = nodes
         self.edges = edges
         self.selectCurrentPathAction.setEnabled(self.nodes is not None)
+        
+        # Update profile widget if it supports setProfileFromTree
+        if self.plotWidget and hasattr(self.plotWidget, 'setProfileFromTree'):
+            self.plotWidget.setProfileFromTree(nodes, edges)
