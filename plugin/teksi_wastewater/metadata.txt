@@ -6,6 +6,7 @@ about=Provides selection, connection and editing tools. Requires a compatible TE
 
 qgisMinimumVersion=3.34.8
 qgisMaximumVersion=4.99
+supportsQt6=True
 category=Vector
 version=0.0.0
 

@@ -91,7 +91,7 @@ class TwwMapTool(QgsMapTool):
     def __init__(self, iface: QgisInterface, button, network_analyzer: TwwGraphManager = None):
         QgsMapTool.__init__(self, iface.mapCanvas())
         self.canvas = iface.mapCanvas()
-        self.cursor = QCursor(Qt.CrossCursor)
+        self.cursor = QCursor(Qt.CursorShape.CrossCursor)
         self.button = button
         self.msgBar = iface.messageBar()
         self.network_analyzer = network_analyzer
@@ -139,7 +139,7 @@ class TwwMapTool(QgsMapTool):
         """
         Issues rightClicked and leftClicked events
         """
-        if event.button() == Qt.RightButton:
+        if event.button() == Qt.MouseButton.RightButton:
             self.rightClicked(event)
         else:
             self.leftClicked(event)
@@ -236,7 +236,7 @@ class TwwMapTool(QgsMapTool):
             for action in sorted(actions.keys(), key=lambda o: o.text()):
                 menu.addAction(action)
 
-            clicked_action = menu.exec_(self.canvas.mapToGlobal(event.pos()))
+            clicked_action = menu.exec(self.canvas.mapToGlobal(event.pos()))
 
             if clicked_action is not None:
                 return actions[clicked_action]
@@ -307,8 +307,9 @@ class TwwProfileMapTool(TwwMapTool):
         @param start_point: The id of the start point of the path
         @param end_point:   The id of the end point of the path
         """
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        (vertices, edges) = self.network_analyzer.shortestPath(start_point, end_point)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        # try:
+        vertices, edges = self.network_analyzer.shortestPath(start_point, end_point)
         if len(vertices) > 0:
             # Save segment for undo before appending
             self._segment_history.append((vertices, edges))
@@ -565,7 +566,7 @@ class TwwTreeMapTool(TwwMapTool):
         Does the work. Tracks the graph up- or downstream.
         :param node_id: The node from which the tracking should be started
         """
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         upstream = self.direction == "upstream"
 
         self.rubberBand.reset()
@@ -810,7 +811,7 @@ class TwwMapToolConnectNetworkElements(QgsMapTool):
 
         self.action.setChecked(True)
 
-        self.iface.mapCanvas().setCursor(QCursor(Qt.CrossCursor))
+        self.iface.mapCanvas().setCursor(QCursor(Qt.CursorShape.CrossCursor))
 
     def setSnapLayers(self, snapper, layers):
         config = QgsSnappingConfig()
@@ -881,7 +882,7 @@ class TwwMapToolConnectNetworkElements(QgsMapTool):
         """
         On a click update the rubberbands and the snapping results if it's a left click. Reset if it's a right click.
         """
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             if self.snapresult.isValid():
                 if self.source_match:
                     self.connect_features(self.source_match, self.snapresult)
@@ -953,7 +954,9 @@ class TwwMapToolConnectNetworkElements(QgsMapTool):
             properties.append(cbx)
             dlg.layout().addWidget(cbx)
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         dlg.layout().addWidget(btn_box)
         btn_box.accepted.connect(dlg.accept)
         btn_box.rejected.connect(dlg.reject)
@@ -961,7 +964,7 @@ class TwwMapToolConnectNetworkElements(QgsMapTool):
         source_feature = self.get_feature_for_match(source)
         target_feature = self.get_feature_for_match(target)
 
-        if dlg.exec_():
+        if dlg.exec():
             for cbx in properties:
                 if cbx.isChecked():
                     source_feature[cbx.objectName()] = target_feature["obj_id"]
