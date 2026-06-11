@@ -47,13 +47,6 @@ class TwwSettingsDialog(QDialog, DIALOG_UI):
 
         project = QgsProject.instance()
 
-        svgprofile_path = self.settings.value("/TWW/SvgProfilePath", None)
-        if svgprofile_path:
-            self.mGbOverrideDefaultProfileTemplate.setChecked(True)
-            self.mProfileTemplateFile.setText(svgprofile_path)
-        else:
-            self.mGbOverrideDefaultProfileTemplate.setChecked(False)
-
         develmode = self.settings.value("/TWW/DeveloperMode", False, type=bool)
         self.mCbDevelMode.setChecked(develmode)
 
@@ -83,7 +76,6 @@ class TwwSettingsDialog(QDialog, DIALOG_UI):
             QColor(self.settings.value("/TWW/HighlightColor", "#40FF40"))
         )
 
-        self.mPbnChooseProfileTemplateFile.clicked.connect(self.onChooseProfileTemplateFileClicked)
         self.mPbnChooseLogFile.clicked.connect(self.onChooseLogFileClicked)
 
         self.accepted.connect(self.onAccept)
@@ -218,10 +210,8 @@ class TwwSettingsDialog(QDialog, DIALOG_UI):
     def onAccept(self):
         twwlogger = logging.getLogger("tww")
         # General settings
-        if self.mGbOverrideDefaultProfileTemplate.isChecked() and self.mProfileTemplateFile.text():
-            self.settings.setValue("/TWW/SvgProfilePath", self.mProfileTemplateFile.text())
-        else:
-            self.settings.remove("/TWW/SvgProfilePath")
+        # Remove legacy setting from the old SVG profile implementation
+        self.settings.remove("/TWW/SvgProfilePath")
 
         self.settings.setValue("/TWW/DeveloperMode", self.mCbDevelMode.isChecked())
         self.settings.setValue("/TWW/AdminMode", self.mCbAdminMode.isChecked())
@@ -291,16 +281,6 @@ class TwwSettingsDialog(QDialog, DIALOG_UI):
         project.writeEntry(
             "TWW", "GraphNodeLayer", self.mCbGraphNodes.itemData(graph_nodelayer_idx)
         )
-
-    @pyqtSlot()
-    def onChooseProfileTemplateFileClicked(self):
-        filename, __ = QFileDialog.getOpenFileName(
-            self,
-            self.tr("Select profile template"),
-            "",
-            self.tr("HTML files(*.htm *.html)"),
-        )
-        self.mProfileTemplateFile.setText(filename)
 
     @pyqtSlot()
     def onChooseLogFileClicked(self):

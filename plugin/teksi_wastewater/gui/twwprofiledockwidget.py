@@ -126,10 +126,10 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
     @pyqtSlot()
     def onPrintButtonClicked(self):
         if not self.plotWidget:
-            QMessageBox.critical(
+            QMessageBox.information(
                 self,
                 self.tr("Print function not available"),
-                self.tr("Print function not available because of missing dependeny QtWebKit"),
+                self.tr("No profile is currently displayed."),
             )
             return
 

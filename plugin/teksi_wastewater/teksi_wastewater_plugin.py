@@ -34,12 +34,6 @@ from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QApplication, QMessageBox, QToolBar
 from qgis.utils import qgsfunction
 
-try:
-    from .gui.twwplotsvgwidget import TwwPlotSVGWidget
-except ImportError:
-    TwwPlotSVGWidget = None
-
-# Import the new elevation profile widget
 from .gui.twwelevationprofilewidget import TwwElevationProfileWidget
 
 
@@ -82,14 +76,6 @@ class TeksiWastewaterPlugin:
     # Wizard
     wizarddock = None
 
-    # The layer ids the plugin will need
-    edgeLayer = None
-    nodeLayer = None
-    specialStructureLayer = None
-    networkElementLayer = None
-
-    profile = None
-
     def __init__(self, iface):
         if os.environ.get("QGIS_DEBUGPY_HAS_LOADED") is None and QSettings().value(
             "/TWW/DeveloperMode", False, type=bool
@@ -108,6 +94,7 @@ class TeksiWastewaterPlugin:
         self.canvas = iface.mapCanvas()
         self.nodes = None
         self.edges = None
+        self.plotWidget = None
 
         self.interlisImporterExporter = None
 
@@ -577,26 +564,9 @@ class TeksiWastewaterPlugin:
             self.profile_dock.closed.connect(self.onDockClosed)
             self.profile_dock.showIt()
 
-            self.plotWidget = None
-            # Use the new Elevation Profile widget if available
-            if TwwElevationProfileWidget is not None:
-                print("*** Using NEW TwwElevationProfileWidget (QGIS Elevation Profile Canvas) ***")
-                self.plotWidget = TwwElevationProfileWidget(self.profile_dock, self.network_analyzer)
-                # Note: The new widget doesn't have mouseOver signals (those were for the old SVG implementation)
-                # TODO: Add interactivity features if needed in the future
-                self.profile_dock.addPlotWidget(self.plotWidget)
-                self.profile_dock.setTree(self.nodes, self.edges)
-            elif TwwPlotSVGWidget is not None:
-                # Fallback to old widget if new one is not available
-                #self.logger.info("Using OLD TwwPlotSVGWidget (QtWebKit fallback)")
-                print("*** Using OLD TwwPlotSVGWidget (QtWebKit fallback) ***")
-                self.plotWidget = TwwPlotSVGWidget(self.profile_dock, self.network_analyzer)
-                self.plotWidget.specialStructureMouseOver.connect(self.highlightProfileElement)
-                self.plotWidget.specialStructureMouseOut.connect(self.unhighlightProfileElement)
-                self.plotWidget.reachMouseOver.connect(self.highlightProfileElement)
-                self.plotWidget.reachMouseOut.connect(self.unhighlightProfileElement)
-                self.profile_dock.addPlotWidget(self.plotWidget)
-                self.profile_dock.setTree(self.nodes, self.edges)
+            self.plotWidget = TwwElevationProfileWidget(self.profile_dock, self.network_analyzer)
+            self.profile_dock.addPlotWidget(self.plotWidget)
+            self.profile_dock.setTree(self.nodes, self.edges)
 
     def onDockClosed(self):  # used when Dock dialog is closed
         """
@@ -623,114 +593,82 @@ class TeksiWastewaterPlugin:
 
         self.profileAction.setChecked(False)
         self.profile_dock = None
+        # Dock uses WA_DeleteOnClose, so the plot widget is destroyed with it
+        self.plotWidget = None
 
     def onProfileChanged(self, profile):
         """
         The profile changed: update the plot
         @param profile: The profile to plot
         """
-        self.profile = profile.copy()
+        if not self.plotWidget:
+            return
 
-        if self.plotWidget:
-            # Only call setProfile if the widget has this method (old SVG widget)
-            if hasattr(self.plotWidget, 'setProfile'):
-                self.plotWidget.setProfile(profile)
-            # For new Elevation Profile widget, convert TwwProfile to QgsGeometry
-            elif hasattr(self.plotWidget, 'setProfileCurve'):
-                from qgis.core import QgsGeometry
-                
-                self.logger.debug(f"onProfileChanged: Received new profile with {len(profile.getElements())} elements")
-                print(f"✓ onProfileChanged: Received new profile with {len(profile.getElements())} elements")
-                
-                # Get geometry directly from profile_tool's pathPolyline
-                # This is already in the correct order (built in appendProfile)
-                if hasattr(self, 'profile_tool') and hasattr(self.profile_tool, 'pathPolyline'):
-                    path_polyline = self.profile_tool.pathPolyline
-                    if path_polyline and len(path_polyline) > 0:
-                        self.logger.debug(f"onProfileChanged: Using profile_tool.pathPolyline with {len(path_polyline)} points")
-                        print(f"✓ Using profile_tool.pathPolyline with {len(path_polyline)} points")
-                        print(f"  First point: {path_polyline[0]}, Last point: {path_polyline[-1]}")
-                        
-                        profile_geometry = QgsGeometry.fromPolylineXY(path_polyline)
-                        if profile_geometry and not profile_geometry.isEmpty():
-                            self.logger.debug(f"onProfileChanged: Calling setProfileCurve with geometry")
-                            print(f"✓ Calling setProfileCurve with geometry")
-                            self.plotWidget.setProfileCurve(profile_geometry)
-                        else:
-                            self.logger.warning("onProfileChanged: Geometry is empty or invalid")
-                            print(f"✗ Geometry is empty or invalid")
-                    else:
-                        self.logger.warning("onProfileChanged: pathPolyline is empty")
-                        print(f"⚠ profile_tool.pathPolyline is empty, trying to build from profile elements")
-                        # Fallback: build from profile elements
-                        self._buildProfileFromElements(profile)
-                else:
-                    self.logger.warning("onProfileChanged: profile_tool or pathPolyline not available")
-                    print(f"⚠ profile_tool.pathPolyline not available, trying to build from profile elements")
-                    # Fallback: build from profile elements
-                    self._buildProfileFromElements(profile)
-    
+        from qgis.core import QgsGeometry
+
+        self.logger.debug(
+            f"onProfileChanged: Received new profile with {len(profile.getElements())} elements"
+        )
+
+        # Get geometry directly from profile_tool's pathPolyline
+        # This is already in the correct order (built in appendProfile)
+        path_polyline = getattr(self.profile_tool, "pathPolyline", None)
+        if path_polyline:
+            profile_geometry = QgsGeometry.fromPolylineXY(path_polyline)
+            if profile_geometry and not profile_geometry.isEmpty():
+                self.plotWidget.setProfileCurve(profile_geometry)
+            else:
+                self.logger.warning("onProfileChanged: Geometry is empty or invalid")
+        else:
+            self.logger.warning(
+                "onProfileChanged: pathPolyline is empty, building from profile elements"
+            )
+            self._buildProfileFromElements(profile)
+
     def _buildProfileFromElements(self, profile):
         """
         Fallback method to build profile geometry from profile elements.
         """
-        from qgis.core import QgsGeometry, QgsPointXY
-        
+        from qgis.core import QgsGeometry
+
         reach_elements = [
-            elem for elem in profile.getElements() 
+            elem for elem in profile.getElements()
             if hasattr(elem, 'type') and elem.type == "reach" and hasattr(elem, 'detail_geometry') and elem.detail_geometry
         ]
-        
-        if reach_elements:
-            self.logger.debug(f"_buildProfileFromElements: Found {len(reach_elements)} reach elements")
-            print(f"  Found {len(reach_elements)} reach elements")
-            
-            # Sort by start offset
-            def get_start_offset(elem):
-                if hasattr(elem, 'reachPoints') and elem.reachPoints:
-                    offsets = [p.get('offset', 0) for p in elem.reachPoints.values() if 'offset' in p]
-                    return min(offsets) if offsets else 0
-                return 0
-            
-            reach_elements_sorted = sorted(reach_elements, key=get_start_offset)
-            
-            points = []
-            for elem in reach_elements_sorted:
-                if elem.detail_geometry:
-                    geom_points = elem.detail_geometry.asPolyline()
-                    if points:
-                        if points[-1] == geom_points[0]:
-                            points.extend(geom_points[1:])
-                        else:
-                            points.extend(geom_points)
-                    else:
-                        points.extend(geom_points)
-            
-            if points:
-                self.logger.debug(f"_buildProfileFromElements: Built polyline with {len(points)} points")
-                print(f"  Built polyline with {len(points)} points")
-                profile_geometry = QgsGeometry.fromPolylineXY(points)
-                self.plotWidget.setProfileCurve(profile_geometry)
-            else:
-                self.logger.warning("_buildProfileFromElements: No points extracted from reach elements")
-                print(f"✗ No points extracted from reach elements")
-        else:
+
+        if not reach_elements:
             self.logger.warning("_buildProfileFromElements: No reach elements found in profile")
-            print(f"✗ No reach elements found in profile")
+            return
+
+        # Sort by start offset
+        def get_start_offset(elem):
+            if hasattr(elem, 'reachPoints') and elem.reachPoints:
+                offsets = [p.get('offset', 0) for p in elem.reachPoints.values() if 'offset' in p]
+                return min(offsets) if offsets else 0
+            return 0
+
+        reach_elements_sorted = sorted(reach_elements, key=get_start_offset)
+
+        points = []
+        for elem in reach_elements_sorted:
+            if elem.detail_geometry:
+                geom_points = elem.detail_geometry.asPolyline()
+                if points and points[-1] == geom_points[0]:
+                    points.extend(geom_points[1:])
+                else:
+                    points.extend(geom_points)
+
+        if points:
+            profile_geometry = QgsGeometry.fromPolylineXY(points)
+            self.plotWidget.setProfileCurve(profile_geometry)
+        else:
+            self.logger.warning("_buildProfileFromElements: No points extracted from reach elements")
 
     def onTreeChanged(self, nodes, edges):
         if self.profile_dock:
             self.profile_dock.setTree(nodes, edges)
         self.nodes = nodes
         self.edges = edges
-
-    def highlightProfileElement(self, obj_id):
-        if self.profile is not None:
-            self.profile.highlight(str(obj_id))
-
-    def unhighlightProfileElement(self):
-        if self.profile is not None:
-            self.profile.highlight(None)
 
     def updateSymbology(self):
         try:
