@@ -225,20 +225,24 @@ class ProfileHoverManager:
             bottom_level = dash.get("bottom_level")
             width_px = dash.get("width", 10)
 
-            if dash_distance is None or cover_level is None or bottom_level is None:
+            if dash_distance is None or (cover_level is None and bottom_level is None):
                 continue
+
+            # A missing level is anchored at the known one (matches the red-X drawing).
+            eff_cover = cover_level if cover_level is not None else bottom_level
+            eff_bottom = bottom_level if bottom_level is not None else cover_level
 
             dist_diff = abs(distance - dash_distance)
             if dist_diff > tolerance_dist:
                 continue
 
-            min_elev = min(bottom_level, cover_level) - tolerance_elev
-            max_elev = max(bottom_level, cover_level) + tolerance_elev
+            min_elev = min(eff_bottom, eff_cover) - tolerance_elev
+            max_elev = max(eff_bottom, eff_cover) + tolerance_elev
 
             if not (min_elev <= elevation <= max_elev):
                 continue
 
-            center_elev = (cover_level + bottom_level) / 2
+            center_elev = (eff_cover + eff_bottom) / 2
             elev_diff = abs(elevation - center_elev)
             distance2 = dist_diff * dist_diff + elev_diff * elev_diff
 
@@ -252,6 +256,7 @@ class ProfileHoverManager:
                             "obj_id": dash.get("obj_id"),
                             "cover_level": cover_level,
                             "bottom_level": bottom_level,
+                            "cover_level_missing": dash.get("cover_level_missing", False),
                             "bottom_level_missing": dash.get("bottom_level_missing", False),
                             "width": width_px,
                             "node_type": "manhole",
@@ -487,7 +492,7 @@ class ProfileHoverManager:
         elif is_cover:
             obj_id = _pick_attr(attrs, ["obj_id", "objId", "id"])
             lines.append(f"Cover {obj_id}" if obj_id else "Cover")
-            cover_data = self._getCoverEnhancedData(obj_id, attrs)
+            cover_data = self._getCoverEnhancedData(attrs)
             level = cover_data.get("level") or _to_float(
                 _pick_attr(attrs, ["level", "cover_level"])
             )
@@ -511,13 +516,20 @@ class ProfileHoverManager:
 
             if is_actual_manhole:
                 lines.append(f"Manhole: {obj_id}" if obj_id else "Manhole")
-                manhole_data = self._getManholeEnhancedData(obj_id, attrs, feature)
+                manhole_data = self._getManholeEnhancedData(obj_id, attrs)
 
                 # Cover / Bottom: prefer DB-pre-formatted label (handles multi-cover etc.);
                 # fall back to numeric format if the label field is missing.
                 cover_level = manhole_data.get("cover_level")
+                cover_level_missing = (
+                    manhole_data.get("cover_level_missing", False)
+                    or attrs.get("cover_level_missing", False)
+                    or cover_level is None
+                )
                 cover_label = manhole_data.get("cover_label")
-                if cover_label:
+                if cover_level_missing:
+                    lines.append('Cover level: <span style="color:red">Missing Data</span>')
+                elif cover_label:
                     lines.append(
                         "Cover level: " + str(cover_label).replace("\n", "<br>&nbsp;&nbsp;")
                     )
@@ -633,41 +645,30 @@ class ProfileHoverManager:
     # Data enrichment (layer queries)
     # ------------------------------------------------------------------
 
-    def _getCoverEnhancedData(self, obj_id, attrs):
+    def _getCoverEnhancedData(self, attrs):
         """
-        Get enhanced cover data from vm_cover layer.
+        Get cover data from the hovered feature's attributes.
 
-        Fields: obj_id, level, material, cover_shape, brand.
+        Cover points are memory-layer features carrying the full
+        vw_tww_wastewater_structure row (co_* fields from the main cover),
+        so no extra layer query is needed.
         """
-        result = {}
-        if not obj_id:
-            return result
+        return {
+            "level": _to_float(_pick_attr(attrs, ["co_level", "level"])),
+            "material": _pick_attr(attrs, ["co_material", "material"]),
+            "cover_shape": _pick_attr(attrs, ["co_cover_shape", "co_shape", "cover_shape"]),
+            "brand": _pick_attr(attrs, ["co_brand", "brand"]),
+        }
 
-        cover_layer = TwwLayerManager.layer("vm_cover") or TwwLayerManager.layer("vw_cover")
-        if cover_layer is None:
-            result["level"] = _to_float(_pick_attr(attrs, ["level"]))
-            result["material"] = _pick_attr(attrs, ["material"])
-            result["cover_shape"] = _pick_attr(attrs, ["cover_shape"])
-            result["brand"] = _pick_attr(attrs, ["brand"])
-            return result
-
-        request = QgsFeatureRequest().setFilterExpression(f'"obj_id" = \'{obj_id}\'')
-        request.setLimit(1)
-        for feat in cover_layer.getFeatures(request):
-            feat_attrs = _feature_attributes(feat)
-            result["level"] = _to_float(_pick_attr(feat_attrs, ["level"]))
-            result["material"] = _pick_attr(feat_attrs, ["material"])
-            result["cover_shape"] = _pick_attr(feat_attrs, ["cover_shape"])
-            result["brand"] = _pick_attr(feat_attrs, ["brand"])
-
-        return result
-
-    def _getManholeEnhancedData(self, obj_id, attrs, feature):
+    def _getManholeEnhancedData(self, obj_id, attrs):
         """
-        Get enhanced manhole data from related tables.
+        Get enhanced manhole data from vw_tww_wastewater_structure only.
 
-        Queries: vw_tww_wastewater_structure, vm_cover/vw_cover, vw_wastewater_node.
-
+        The id at hand may be either the structure obj_id (layer hover) or the
+        main node obj_id / wn_obj_id (dash hover); the OR-filter handles both.
+        Levels come from co_level / wn_bottom_level with deliberately NO
+        fallback — a missing level is flagged so the tooltip shows
+        "Missing Data" in red, consistent with the red X in the drawing.
         """
         result = {}
         ws_id = _pick_attr(
@@ -683,15 +684,13 @@ class ProfileHoverManager:
         if not ws_id:
             ws_id = obj_id
 
-        # 1. Query vw_tww_wastewater_structure for entry/exit labels and shaft width.
-        # NB: vw_wastewater_node has NO dimension1 / width / diameter fields; the
-        # only authoritative shaft-width source is ma_dimension1 (mm) on the
-        # wastewater_structure view.
         ws_layer = TwwLayerManager.layer("vw_tww_wastewater_structure") or TwwLayerManager.layer(
             "tww_wastewater_structure"
         )
         if ws_layer and ws_id:
-            request = QgsFeatureRequest().setFilterExpression(f'"obj_id" = \'{ws_id}\'')
+            request = QgsFeatureRequest().setFilterExpression(
+                f'"obj_id" = \'{ws_id}\' OR "wn_obj_id" = \'{ws_id}\''
+            )
             request.setLimit(1)
             for ws_feat in ws_layer.getFeatures(request):
                 ws_attrs = _feature_attributes(ws_feat)
@@ -702,68 +701,24 @@ class ProfileHoverManager:
                 result["input_label"] = _pick_attr(ws_attrs, ["_input_label", "input_label"])
                 result["output_label"] = _pick_attr(ws_attrs, ["_output_label", "output_label"])
                 result["width"] = _to_float(_pick_attr(ws_attrs, ["ma_dimension1"]))
+                result["cover_level"] = _to_float(_pick_attr(ws_attrs, ["co_level"]))
+                result["bottom_level"] = _to_float(_pick_attr(ws_attrs, ["wn_bottom_level"]))
 
-        # 2. Query cover level from vm_cover or vw_cover (join on fk_wastewater_structure)
-        cover_layer = TwwLayerManager.layer("vm_cover") or TwwLayerManager.layer("vw_cover")
-        if cover_layer and ws_id:
-            request = QgsFeatureRequest().setFilterExpression(
-                f'"fk_wastewater_structure" = \'{ws_id}\''
+        # Hovered feature may itself carry the structure fields (memory layers
+        # copy the full vw_tww_wastewater_structure row) — same source, no extra query.
+        if result.get("cover_level") is None:
+            result["cover_level"] = _to_float(
+                _pick_attr(attrs, ["co_level", "cover_level", "coverLevel"])
             )
-            request.setLimit(1)
-            for cover_feat in cover_layer.getFeatures(request):
-                cover_attrs = _feature_attributes(cover_feat)
-                result["cover_level"] = _to_float(
-                    _pick_attr(cover_attrs, ["level", "cover_level", "coverLevel", "elevation"])
-                )
-
-        if "cover_level" not in result or result["cover_level"] is None:
-            result["cover_level"] = _to_float(_pick_attr(attrs, ["cover_level", "coverLevel"]))
-
-        # 3. Query bottom level from vw_wastewater_node
-        node_layer = TwwLayerManager.layer("vw_wastewater_node")
-        if node_layer and obj_id:
-            request = QgsFeatureRequest().setFilterExpression(f'"obj_id" = \'{obj_id}\'')
-            request.setLimit(1)
-            for node_feat in node_layer.getFeatures(request):
-                node_attrs = _feature_attributes(node_feat)
-                result["bottom_level"] = _to_float(
-                    _pick_attr(node_attrs, ["bottom_level", "bottomLevel", "invert_level"])
-                )
-
-        if "bottom_level" not in result or result["bottom_level"] is None:
+        if result.get("bottom_level") is None:
             result["bottom_level"] = _to_float(
-                _pick_attr(attrs, ["bottom_level", "bottomLevel", "invert_level"])
+                _pick_attr(attrs, ["wn_bottom_level", "bottom_level", "bottomLevel"])
             )
 
-        # 4. Fallback for missing bottom_level: query connected reach endpoints.
-        if result.get("bottom_level") is None or result.get("bottom_level") == 0:
-            reach_layer = TwwLayerManager.layer("vw_tww_reach")
-            if reach_layer is not None and obj_id:
-                expr = (
-                    f'"rp_to_fk_wastewater_networkelement" = \'{obj_id}\''
-                    f' OR "rp_from_fk_wastewater_networkelement" = \'{obj_id}\''
-                )
-                request = QgsFeatureRequest().setFilterExpression(expr)
-                reach_levels = []
-                for reach_feat in reach_layer.getFeatures(request):
-                    reach_attrs = _feature_attributes(reach_feat)
-                    to_node = _pick_attr(reach_attrs, ["rp_to_fk_wastewater_networkelement"])
-                    from_node = _pick_attr(
-                        reach_attrs, ["rp_from_fk_wastewater_networkelement"]
-                    )
-                    if str(to_node) == str(obj_id):
-                        lv = _to_float(_pick_attr(reach_attrs, ["rp_to_level"]))
-                        if lv is not None:
-                            reach_levels.append(lv)
-                    if str(from_node) == str(obj_id):
-                        lv = _to_float(_pick_attr(reach_attrs, ["rp_from_level"]))
-                        if lv is not None:
-                            reach_levels.append(lv)
-                if reach_levels:
-                    result["bottom_level"] = min(reach_levels)
-            result["bottom_level_missing"] = True
-        else:
-            result["bottom_level_missing"] = False
+        result["cover_level_missing"] = result.get("cover_level") is None
+        if result.get("bottom_level") == 0:
+            result["bottom_level"] = None
+        result["bottom_level_missing"] = result.get("bottom_level") is None
 
         return result
 
@@ -811,24 +766,31 @@ class ProfileHoverManager:
                 "vw_tww_reach", f'"obj_id" = \'{obj_id}\'', highlight_key
             )
         elif is_cover:
-            highlight_key = f"cover:{obj_id}"
+            # Cover points carry the structure row: fk_main_cover is the actual
+            # cover id; obj_id (the structure id) is kept as a fallback key.
+            cover_id = _pick_attr(attrs, ["fk_main_cover"]) or obj_id
+            highlight_key = f"cover:{cover_id}"
             if highlight_key == self._current_highlight_key:
                 return
             self._doHighlightFeature(
-                "vm_cover", f'"obj_id" = \'{obj_id}\'', highlight_key, "vw_cover"
+                "vm_cover", f'"obj_id" = \'{cover_id}\'', highlight_key, "vw_cover"
             )
         elif is_manhole:
             ws_id = _pick_attr(
                 attrs, ["fk_wastewater_structure", "fk_wastewater_structure_obj_id", "ws_obj_id"]
             )
             if not ws_id and obj_id:
-                node_layer = TwwLayerManager.layer("vw_wastewater_node")
-                if node_layer:
-                    req = QgsFeatureRequest().setFilterExpression(f'"obj_id" = \'{obj_id}\'')
+                # The hovered id is either the structure obj_id (layer hover)
+                # or the main node obj_id (dash hover); resolve it on
+                # vw_tww_wastewater_structure — vw_wastewater_node is not needed.
+                ws_layer = TwwLayerManager.layer("vw_tww_wastewater_structure")
+                if ws_layer:
+                    req = QgsFeatureRequest().setFilterExpression(
+                        f'"obj_id" = \'{obj_id}\' OR "wn_obj_id" = \'{obj_id}\''
+                    )
                     req.setLimit(1)
-                    for nf in node_layer.getFeatures(req):
-                        na = _feature_attributes(nf)
-                        ws_id = _pick_attr(na, ["fk_wastewater_structure", "ws_obj_id"])
+                    for wf in ws_layer.getFeatures(req):
+                        ws_id = _pick_attr(_feature_attributes(wf), ["obj_id"])
                         break
             if ws_id:
                 highlight_key = f"manhole:{ws_id}"

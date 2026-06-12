@@ -22,7 +22,7 @@
 #
 # ---------------------------------------------------------------------
 
-from qgis.core import QgsFeatureRequest, QgsGeometry, QgsLineString
+from qgis.core import Qgis, QgsFeatureRequest, QgsGeometry, QgsLineString
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import QVBoxLayout, QWidget
 
@@ -281,74 +281,33 @@ class TwwElevationProfileWidget(QWidget):
             self.canvas.setManholeDashes([])
             return
 
-        layer = TwwLayerManager.layer("vw_wastewater_node")
-        if layer is None:
+        # Single source: vw_tww_wastewater_structure. Its geometry is the main
+        # wastewater node position (COALESCE(wn.situation3d_geometry, main
+        # cover)), so it sits exactly on the profile curve and replaces the
+        # former vw_wastewater_node scan entirely. Levels come from co_level /
+        # wn_bottom_level with deliberately NO fallback — a missing level is
+        # flagged and rendered as a red X so the data gap stays visible.
+        ws_layer = TwwLayerManager.layer("vw_tww_wastewater_structure")
+        if ws_layer is None:
             self.canvas.setManholeDashes([])
             return
 
-        # Preload structure attributes keyed by AK-id (vw_wastewater_node.obj_id == ws.wn_obj_id).
-        # vw_wastewater_node has no dimension1/cover_level fields; the authoritative source
-        # for shaft width / cover level / bottom level is vw_tww_wastewater_structure.
-        # Single full-table scan replaces the former vw_cover scan and powers the per-node loop.
-        ws_data_by_ak = {}
-        ws_layer = TwwLayerManager.layer("vw_tww_wastewater_structure")
-        if ws_layer is not None:
-            for ws_feat in ws_layer.getFeatures():
-                ws_attrs = _feature_attributes(ws_feat)
-                ak_id = _pick_attr(ws_attrs, ["wn_obj_id"])
-                if not ak_id:
-                    continue
-                ws_data_by_ak[str(ak_id)] = {
-                    "ma_dimension1": _to_float(_pick_attr(ws_attrs, ["ma_dimension1"])),
-                    "ma_dimension2": _to_float(_pick_attr(ws_attrs, ["ma_dimension2"])),
-                    "co_level": _to_float(_pick_attr(ws_attrs, ["co_level"])),
-                    "wn_bottom_level": _to_float(_pick_attr(ws_attrs, ["wn_bottom_level"])),
-                    "ws_type": _pick_attr(ws_attrs, ["ws_type"]),
-                    "ss_function": _pick_attr(ws_attrs, ["ss_function"]),
-                    "_cover_label": _pick_attr(ws_attrs, ["_cover_label"]),
-                    "_bottom_label": _pick_attr(ws_attrs, ["_bottom_label"]),
-                    "_input_label": _pick_attr(ws_attrs, ["_input_label"]),
-                    "_output_label": _pick_attr(ws_attrs, ["_output_label"]),
-                }
-
-        # Build reach-level lookup: node_obj_id → [connected reach levels]
-        reach_levels_by_node = {}
-        reach_layer = TwwLayerManager.layer("vw_tww_reach")
-        if reach_layer is not None:
-            for reach_feat in reach_layer.getFeatures():
-                reach_attrs = _feature_attributes(reach_feat)
-                to_node_id = _pick_attr(
-                    reach_attrs,
-                    [
-                        "rp_to_fk_wastewater_networkelement",
-                        "rp_to_fk_wastewater_networkelement_id",
-                    ],
-                )
-                to_level = _to_float(_pick_attr(reach_attrs, ["rp_to_level"]))
-                if to_node_id and to_level is not None:
-                    reach_levels_by_node.setdefault(str(to_node_id), []).append(to_level)
-
-                from_node_id = _pick_attr(
-                    reach_attrs,
-                    [
-                        "rp_from_fk_wastewater_networkelement",
-                        "rp_from_fk_wastewater_networkelement_id",
-                    ],
-                )
-                from_level = _to_float(_pick_attr(reach_attrs, ["rp_from_level"]))
-                if from_node_id and from_level is not None:
-                    reach_levels_by_node.setdefault(str(from_node_id), []).append(from_level)
-
-        from qgis.core import Qgis
-
         dashes = []
-        for feature in layer.getFeatures():
+        for feature in ws_layer.getFeatures():
             geometry = feature.geometry()
             if geometry is None or geometry.isEmpty():
                 continue
             attrs = _feature_attributes(feature)
-            obj_id = _pick_attr(attrs, ["obj_id", "objId", "id"])
-            ws_info = ws_data_by_ak.get(str(obj_id)) if obj_id else None
+
+            cover_level = _to_float(_pick_attr(attrs, ["co_level"]))
+            bottom_level = _to_float(_pick_attr(attrs, ["wn_bottom_level"]))
+            cover_level_missing = cover_level is None
+            bottom_level_missing = bottom_level is None or bottom_level == 0
+            if bottom_level_missing:
+                bottom_level = None
+            # Both levels missing: no elevation to anchor a marker to.
+            if cover_level_missing and bottom_level_missing:
+                continue
 
             if geometry.type() != Qgis.GeometryType.Point:
                 try:
@@ -370,51 +329,19 @@ class TwwElevationProfileWidget(QWidget):
             except Exception:
                 pass
 
-            # cover_level: single source — vw_tww_wastewater_structure.co_level
-            # (58% coverage in production; nodes without a cover level are skipped below).
-            cover_level = ws_info.get("co_level") if ws_info else None
-
-            bottom_level = _to_float(
-                _pick_attr(
-                    attrs,
-                    [
-                        "bottom_level",
-                        "bottomLevel",
-                        "invert_level",
-                        "level",
-                        "backflow_level",
-                        "backflow_level_current",
-                    ],
-                )
-            )
-
-            bottom_level_missing = False
-            if bottom_level is None or bottom_level == 0:
-                fallback_level = None
-                if obj_id:
-                    connected_levels = reach_levels_by_node.get(str(obj_id), [])
-                    if connected_levels:
-                        fallback_level = min(connected_levels)
-                if fallback_level is not None:
-                    bottom_level = fallback_level
-                    bottom_level_missing = True
-                else:
-                    continue
-
-            if cover_level is None or bottom_level is None:
-                continue
-
-            dim1_mm = ws_info.get("ma_dimension1") if ws_info else None
+            dim1_mm = _to_float(_pick_attr(attrs, ["ma_dimension1"]))
             line_width = self._manholeDashWidth(dim1_mm)
             dashes.append(
                 {
                     "distance": float(distance_along),
+                    # Keep the node obj_id (wn_obj_id) — downstream hover code
+                    # treats dash obj_id as a wastewater node id.
+                    "obj_id": _pick_attr(attrs, ["wn_obj_id"]),
                     "cover_level": cover_level,
                     "bottom_level": bottom_level,
+                    "cover_level_missing": cover_level_missing,
                     "bottom_level_missing": bottom_level_missing,
                     "width": line_width,
-                    "obj_id": obj_id,
-                    "color": "#6E4C1E",
                 }
             )
 

@@ -26,6 +26,7 @@ from qgis.core import (
     Qgis,
     QgsFeature,
     QgsFillSymbol,
+    QgsGeometry,
     QgsLineString,
     QgsLineSymbol,
     QgsMarkerSymbol,
@@ -35,7 +36,6 @@ from qgis.core import (
     QgsSimpleLineSymbolLayer,
     QgsVectorLayer,
     QgsVectorLayerElevationProperties,
-    QgsWkbTypes,
 )
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
@@ -58,7 +58,8 @@ class ProfileLayerSetup:
         """
         self._canvas = canvas
         self._temp_reach_layer = None  # Memory layer with Z values for vw_tww_reach
-        self._temp_node_layer = None  # Filtered memory layer for vw_wastewater_node
+        self._temp_node_layer = None  # Node points: XY from ws geometry, Z = wn_bottom_level
+        self._temp_cover_layer = None  # Cover points: XY from ws geometry, Z = co_level
 
     # ------------------------------------------------------------------
     # Public API
@@ -70,14 +71,30 @@ class ProfileLayerSetup:
 
         Based on the working configuration tested by the project owner:
         - Use "Capture curve from features" approach
-        - Selected layers: vw_tww_reach, vw_wastewater_node, vw_cover, vw_change_points
+        - Selected layers: vw_tww_reach, node/cover point layers, vw_change_points
         - Set all layers to "Absolute" clamping (use Z values from geometry)
+
+        Node and cover points are memory layers built from
+        vw_tww_wastewater_structure alone: its geometry is the main
+        wastewater node position (sits exactly on the profile curve), Z
+        values come from wn_bottom_level / co_level. No fallback —
+        structures without a level are simply not rendered, keeping missing
+        data visible. Neither vw_cover nor vw_wastewater_node is read.
 
         :param tolerance: Snapping tolerance in map units for the canvas.
         """
         # 1. CRITICAL: Set project first - this is required by QgsElevationProfileCanvas
         project = QgsProject.instance()
         self._canvas.setProject(project)
+
+        # Build node/cover point layers from the structure view.
+        ws_source = TwwLayerManager.layer("vw_tww_wastewater_structure")
+        self._temp_node_layer = self._createStructurePointLayer(
+            ws_source, "wn_bottom_level", "wastewater_node_filtered", skip_zero=True
+        )
+        self._temp_cover_layer = self._createStructurePointLayer(
+            ws_source, "co_level", "cover_from_structure"
+        )
 
         # 2. Define the layers to use (based on working configuration)
         # profile_type: 'surface' = Continuous Surface, 'features' = Individual Features
@@ -146,10 +163,17 @@ class ProfileLayerSetup:
         first_valid_crs = None
 
         for layer_name, _description, profile_type, style in layer_configs:
-            layer = TwwLayerManager.layer(layer_name)
-            # Fallback for potential naming differences in DB/views.
-            if not layer and layer_name == "vw_change_points":
-                layer = TwwLayerManager.layer("vm_change_points")
+            # Node and cover entries are logical names: both are served by the
+            # memory layers built above from vw_tww_wastewater_structure.
+            if layer_name == "vw_wastewater_node":
+                layer = self._temp_node_layer
+            elif layer_name == "vw_cover":
+                layer = self._temp_cover_layer
+            else:
+                layer = TwwLayerManager.layer(layer_name)
+                # Fallback for potential naming differences in DB/views.
+                if not layer and layer_name == "vw_change_points":
+                    layer = TwwLayerManager.layer("vm_change_points")
             if not layer:
                 continue
 
@@ -159,13 +183,6 @@ class ProfileLayerSetup:
                 self._temp_reach_layer = self._createReachLayerWithZ(layer)
                 if self._temp_reach_layer:
                     layer = self._temp_reach_layer
-
-            # Special handling for vw_wastewater_node: filter out nodes with
-            # bottom_level = 0 or NULL so they don't appear at elevation 0
-            if layer_name == "vw_wastewater_node":
-                self._temp_node_layer = self._createFilteredNodeLayer(layer)
-                if self._temp_node_layer:
-                    layer = self._temp_node_layer
 
             # Store first valid CRS for canvas
             if first_valid_crs is None and layer.crs().isValid():
@@ -241,8 +258,6 @@ class ProfileLayerSetup:
         mem_layer.updateFields()
 
         features = []
-        skipped_no_level = 0
-        skipped_no_vertices = 0
 
         for feat in original_layer.getFeatures():
             from_level = None
@@ -255,14 +270,12 @@ class ProfileLayerSetup:
                 pass
 
             if from_level is None or to_level is None:
-                skipped_no_level += 1
                 continue
 
             try:
                 from_level = float(from_level)
                 to_level = float(to_level)
             except (TypeError, ValueError):
-                skipped_no_level += 1
                 continue
 
             geom = feat.geometry()
@@ -271,7 +284,6 @@ class ProfileLayerSetup:
 
             vertices = list(geom.vertices())
             if len(vertices) < 2:
-                skipped_no_vertices += 1
                 continue
 
             new_points = []
@@ -299,8 +311,6 @@ class ProfileLayerSetup:
                 new_points.append(QgsPoint(vertices[-1].x(), vertices[-1].y(), to_level))
 
             new_line = QgsLineString(new_points)
-            from qgis.core import QgsGeometry
-
             new_geom = QgsGeometry(new_line)
             new_feat = QgsFeature()
             new_feat.setGeometry(new_geom)
@@ -311,48 +321,53 @@ class ProfileLayerSetup:
         mem_layer.updateExtents()
         return mem_layer
 
-    def _createFilteredNodeLayer(self, original_layer):
+    def _createStructurePointLayer(self, ws_layer, level_key, name, skip_zero=False):
         """
-        Create a filtered copy of vw_wastewater_node that excludes nodes
-        with bottom_level = 0 or NULL, so they don't appear at elevation 0
-        in the profile canvas.
+        Build a PointZ memory layer for profile rendering from
+        vw_tww_wastewater_structure alone.
 
-        :param original_layer: The original vw_wastewater_node layer
-        :return: Memory layer with only valid nodes, or None if creation fails
+        XY comes from the structure geometry — which the view defines as the
+        main wastewater node position, so it sits exactly on the profile
+        curve. Z comes from the level attribute (co_level / wn_bottom_level).
+        Structures without a level are skipped — deliberately NO fallback,
+        so missing data shows up as a missing point.
+
+        :param ws_layer: vw_tww_wastewater_structure layer
+        :param level_key: "wn_bottom_level" or "co_level"
+        :param name: name for the memory layer
+        :param skip_zero: also skip features whose level is exactly 0
+        :return: Memory layer, or None if the source is unavailable
         """
-        if original_layer is None:
+        if ws_layer is None:
             return None
 
-        crs = original_layer.crs()
+        crs = ws_layer.crs()
         crs_string = crs.authid() if crs.isValid() else "EPSG:2056"
 
-        geom_str = "Point"
-        if original_layer.wkbType() in (
-            QgsWkbTypes.PointZ,
-            QgsWkbTypes.MultiPointZ,
-            QgsWkbTypes.Point25D,
-        ):
-            geom_str = "PointZ"
-
-        mem_layer = QgsVectorLayer(
-            f"{geom_str}?crs={crs_string}",
-            "wastewater_node_filtered",
-            "memory",
-        )
+        mem_layer = QgsVectorLayer(f"PointZ?crs={crs_string}", name, "memory")
         provider = mem_layer.dataProvider()
-        provider.addAttributes(original_layer.fields().toList())
+        provider.addAttributes(ws_layer.fields().toList())
         mem_layer.updateFields()
 
         features = []
-        for feat in original_layer.getFeatures():
+        for feat in ws_layer.getFeatures():
             attrs = _feature_attributes(feat)
-            bottom_level = _to_float(_pick_attr(attrs, ["bottom_level", "bottomLevel", "invert_level"]))
-            # Skip nodes with missing or zero bottom_level
-            if bottom_level is None or bottom_level == 0:
+            level = _to_float(_pick_attr(attrs, [level_key]))
+            if level is None or (skip_zero and level == 0):
+                continue
+
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            try:
+                if geom.type() != Qgis.GeometryType.Point:
+                    geom = geom.centroid()
+                point = geom.asPoint()
+            except Exception:
                 continue
 
             new_feat = QgsFeature()
-            new_feat.setGeometry(feat.geometry())
+            new_feat.setGeometry(QgsGeometry(QgsPoint(point.x(), point.y(), level)))
             new_feat.setAttributes(feat.attributes())
             features.append(new_feat)
 
