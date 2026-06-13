@@ -70,7 +70,6 @@ class TwwElevationProfileWidget(QWidget):
         self._data_sources_setup = False
         self._profile_curve_geom = None
         self._manhole_dash_tolerance = 10.0
-        self._profile_generation_complete = False
 
         # Layer setup helper (owns temp memory layers)
         self._layer_setup = ProfileLayerSetup(self.canvas)
@@ -86,10 +85,6 @@ class TwwElevationProfileWidget(QWidget):
         self._hover_manager = ProfileHoverManager(self.canvas, map_canvas)
         self._hover_manager.setup()
 
-        # Monitor profile generation completion
-        if hasattr(self.canvas, "activeJobCountChanged"):
-            self.canvas.activeJobCountChanged.connect(self._onJobCountChanged)
-
     # ------------------------------------------------------------------
     # Canvas event routing
     # ------------------------------------------------------------------
@@ -99,11 +94,6 @@ class TwwElevationProfileWidget(QWidget):
 
     def _onCanvasLeave(self, event):
         self._hover_manager.onCanvasLeave(event)
-
-    def _onJobCountChanged(self, count):
-        """Called when profile generation jobs change; marks generation complete at 0."""
-        if count == 0 and not self._profile_generation_complete:
-            self._profile_generation_complete = True
 
     # ------------------------------------------------------------------
     # Public API (called by TwwProfileDockWidget)
@@ -139,7 +129,6 @@ class TwwElevationProfileWidget(QWidget):
 
         self._hover_manager.clearState()
         self.canvas.setManholeDashes([])
-        self._profile_generation_complete = False
         self._profile_curve_geom = None
 
         # Note: canvas.clear() crashes QGIS; use empty curve + refresh instead
@@ -149,14 +138,6 @@ class TwwElevationProfileWidget(QWidget):
         if hasattr(self.canvas, "invalidateCurrentPlotExtent"):
             self.canvas.invalidateCurrentPlotExtent()
         self.canvas.refresh()
-
-    def setupDataSources(self):
-        """
-        Set up data sources for the elevation profile canvas.
-
-        Delegates to ProfileLayerSetup.setup().
-        """
-        self._layer_setup.setup(tolerance=self._manhole_dash_tolerance)
 
     def setProfileCurve(self, geometry):
         """
@@ -173,7 +154,6 @@ class TwwElevationProfileWidget(QWidget):
         # Clean up old state before setting new profile
         self._hover_manager.clearState()
         self.canvas.setManholeDashes([])
-        self._profile_generation_complete = False
 
         curve = QgsLineString(points)
 
