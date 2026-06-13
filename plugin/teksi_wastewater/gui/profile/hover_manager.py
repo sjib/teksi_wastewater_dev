@@ -202,7 +202,7 @@ class ProfileHoverManager:
 
     def _identifyManholeDash(self, plot_point):
         """
-        Identify custom-drawn manhole dashes (not in layers, drawn via drawForeground).
+        Identify custom-drawn manhole dashes (not in layers, drawn via ManholeDashPlotItem).
 
         :param plot_point: QPointF with (distance, elevation) in plot coordinates.
         :return: Fake identify-result dict, or None if no match.

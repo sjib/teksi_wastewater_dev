@@ -209,6 +209,13 @@ class ProfileLayerSetup:
                     if hasattr(Qgis, "AltitudeBinding"):
                         elevation_props.setBinding(Qgis.AltitudeBinding.Vertex)
 
+                    # QGIS >= 3.38: Line/Polygon memory layers default to customTolerance=0
+                    # (see QgsVectorLayerElevationProperties::setDefaultsFromLayer), which
+                    # overrides the canvas tolerance and breaks profile/line intersection —
+                    # spurious vertical segments appear at reach vertices. Use canvas tolerance.
+                    if hasattr(elevation_props, "setCustomToleranceEnabled"):
+                        elevation_props.setCustomToleranceEnabled(False)
+
                     self._configureLayerSymbols(elevation_props, style, layer_name)
                     layer.triggerRepaint()
 
@@ -226,7 +233,34 @@ class ProfileLayerSetup:
         if first_valid_crs:
             self._canvas.setCrs(first_valid_crs)
         self._canvas.setLayers(layers_to_add)
-        self._canvas.setTolerance(tolerance)
+        self.applyCanvasTolerance(tolerance)
+
+    def applyCanvasTolerance(self, tolerance=10.0):
+        """
+        Apply canvas tolerance to all profile layers without calling setLayers().
+
+        Safe to call on every profile refresh (QGIS >= 3.38 compatibility).
+        """
+        if hasattr(self._canvas, "setTolerance"):
+            self._canvas.setTolerance(tolerance)
+
+        if not hasattr(self._canvas, "layers"):
+            return
+        layers = self._canvas.layers()
+        if not layers:
+            return
+
+        for layer in layers:
+            elevation_props = layer.elevationProperties()
+            if not elevation_props or not isinstance(
+                elevation_props, QgsVectorLayerElevationProperties
+            ):
+                continue
+            try:
+                if hasattr(elevation_props, "setCustomToleranceEnabled"):
+                    elevation_props.setCustomToleranceEnabled(False)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -394,7 +428,7 @@ class ProfileLayerSetup:
                     inner_layer = QgsSimpleLineSymbolLayer()
                     inner_layer.setColor(QColor(style.get("line_inner", "#FFFFFF")))
                     inner_layer.setWidth(inner_width)
-                    inner_layer.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+                    inner_layer.setPenCapStyle(Qt.PenCapStyle.RoundCap)
                     inner_layer.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
                     line_symbol.appendSymbolLayer(inner_layer)
 
@@ -403,7 +437,7 @@ class ProfileLayerSetup:
                     outline_layer.setColor(QColor(style["line"]))
                     outline_layer.setWidth(outline_width)
                     outline_layer.setOffset(inner_width / 2 - outline_width / 2)
-                    outline_layer.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+                    outline_layer.setPenCapStyle(Qt.PenCapStyle.RoundCap)
                     outline_layer.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
                     line_symbol.appendSymbolLayer(outline_layer)
 
@@ -411,7 +445,7 @@ class ProfileLayerSetup:
                     bottom_layer.setColor(QColor(style["line"]))
                     bottom_layer.setWidth(outline_width)
                     bottom_layer.setOffset(-(inner_width / 2 - outline_width / 2))
-                    bottom_layer.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+                    bottom_layer.setPenCapStyle(Qt.PenCapStyle.RoundCap)
                     bottom_layer.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
                     line_symbol.appendSymbolLayer(bottom_layer)
                 else:

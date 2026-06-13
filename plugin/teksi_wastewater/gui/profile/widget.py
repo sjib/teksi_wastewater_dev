@@ -188,6 +188,8 @@ class TwwElevationProfileWidget(QWidget):
         if not layers_configured or not self._data_sources_setup:
             self._layer_setup.setup(tolerance=self._manhole_dash_tolerance)
             self._data_sources_setup = True
+        else:
+            self._layer_setup.applyCanvasTolerance(self._manhole_dash_tolerance)
 
         if hasattr(self.canvas, "cancelJobs"):
             self.canvas.cancelJobs()
