@@ -564,7 +564,7 @@ class TeksiWastewaterPlugin:
             self.profile_dock.closed.connect(self.onDockClosed)
             self.profile_dock.showIt()
 
-            self.plotWidget = TwwElevationProfileWidget(self.profile_dock, self.network_analyzer)
+            self.plotWidget = TwwElevationProfileWidget(self.profile_dock)
             self.profile_dock.addPlotWidget(self.plotWidget)
             self.profile_dock.setTree(self.nodes, self.edges)
 

@@ -259,4 +259,4 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         
         # Update profile widget if it supports setProfileFromTree
         if self.plotWidget and hasattr(self.plotWidget, 'setProfileFromTree'):
-            self.plotWidget.setProfileFromTree(nodes, edges)
+            self.plotWidget.setProfileFromTree(edges)

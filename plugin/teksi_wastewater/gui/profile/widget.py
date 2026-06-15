@@ -26,7 +26,6 @@ from qgis.core import QgsFeatureRequest, QgsGeometry, QgsLineString
 from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.QtWidgets import QVBoxLayout, QWidget
 
-from ...tools.twwnetwork import TwwGraphManager
 from ...utils.twwlayermanager import TwwLayerManager
 from .canvas import TwwElevationProfileCanvas
 from .hover_manager import ProfileHoverManager
@@ -45,12 +44,11 @@ class TwwElevationProfileWidget(QWidget):
     This widget replaces the old TwwPlotSVGWidget which used QtWebKit.
     """
 
-    def __init__(self, parent, network_analyzer: TwwGraphManager = None):
+    def __init__(self, parent):
         """
         Initialize the elevation profile widget.
 
         :param parent: Parent widget.
-        :param network_analyzer: Network analyzer instance (kept for compatibility).
         """
         QWidget.__init__(self, parent)
 
@@ -62,8 +60,7 @@ class TwwElevationProfileWidget(QWidget):
         self.canvas = TwwElevationProfileCanvas(self)
         layout.addWidget(self.canvas)
 
-        # Compatibility / misc state
-        self.networkAnalyzer = network_analyzer
+        # Misc state
         self.verticalExaggeration = 10.0
         self._data_sources_setup = False
         self._profile_curve_geom = None
@@ -205,13 +202,12 @@ class TwwElevationProfileWidget(QWidget):
         # Delay to allow canvas to finish processing current event
         QTimer.singleShot(0, delayedZoomFull)
 
-    def setProfileFromTree(self, nodes, edges):
+    def setProfileFromTree(self, edges):
         """
-        Set the profile curve from tree data (nodes and edges).
+        Set the profile curve from tree data (edges).
 
         Builds a polyline geometry from the edge list and calls setProfileCurve().
 
-        :param nodes: List of nodes (kept for API compatibility, not used directly).
         :param edges: List of (from_node, to_node, edge_info) tuples.
         """
         reach_layer = TwwLayerManager.layer("vw_tww_reach")

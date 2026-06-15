@@ -434,7 +434,7 @@ class ProfileHoverManager:
         lines = []
 
         is_reach = self._isReachHover(layer_name, attrs)
-        is_cover = self._isCoverHover(layer_name, attrs)
+        is_cover = self._isCoverHover(layer_name)
         is_manhole = self._isManholeHover(layer_name, attrs)
 
         if is_reach:
@@ -571,10 +571,8 @@ class ProfileHoverManager:
                 )
                 if bottom_level is None or bottom_level == 0:
                     lines.append('Bottom level: <span style="color:red">Missing Data</span>')
-                elif bottom_level is not None:
+                else:
                     lines.append(f"Level: {bottom_level:.2f} m")
-                elif plot_point is not None:
-                    lines.append(f"Elevation: {plot_point.y():.2f} m")
         else:
             if layer_name:
                 lines.append(layer_name)
@@ -603,7 +601,7 @@ class ProfileHoverManager:
         has_length = _pick_attr(attrs, ["length_full", "length"]) is not None
         return has_material and has_length
 
-    def _isCoverHover(self, layer_name, attrs):
+    def _isCoverHover(self, layer_name):
         layer_name_lower = (layer_name or "").lower()
         return "cover" in layer_name_lower and "wastewater_node" not in layer_name_lower
 
@@ -725,7 +723,7 @@ class ProfileHoverManager:
         attrs, layer_name, _feature, _layer = self._attrsFromMatch(match)
 
         is_reach = self._isReachHover(layer_name, attrs)
-        is_cover = self._isCoverHover(layer_name, attrs)
+        is_cover = self._isCoverHover(layer_name)
         is_manhole = self._isManholeHover(layer_name, attrs)
         obj_id = _pick_attr(attrs, ["obj_id", "objId", "id"])
 
