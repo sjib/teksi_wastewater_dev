@@ -514,14 +514,12 @@ class ProfileHoverManager:
                 cover_label = manhole_data.get("cover_label")
                 if cover_level_missing:
                     lines.append('Cover level: <span style="color:red">Missing Data</span>')
-                elif cover_label:
-                    lines.append(
-                        "Cover level: " + str(cover_label).replace("\n", "<br>&nbsp;&nbsp;")
-                    )
                 else:
-                    self._appendLabeled(
-                        lines, "Cover level", self._formatMeters(cover_level, decimals=2)
-                    )
+                    cover_text = self._formatLevelLabel(cover_label)
+                    if not cover_text:
+                        cover_text = self._formatMeters(cover_level, decimals=2)
+                    if cover_text:
+                        lines.append(f"Cover level: {cover_text}")
 
                 bottom_level = manhole_data.get("bottom_level")
                 bottom_level_missing = (
@@ -534,28 +532,21 @@ class ProfileHoverManager:
                     lines.append('Bottom level: <span style="color:red">Missing Data</span>')
                 else:
                     bottom_label = manhole_data.get("bottom_label")
-                    if bottom_label:
-                        lines.append(
-                            "Bottom level: " + str(bottom_label).replace("\n", "<br>&nbsp;&nbsp;")
-                        )
-                    else:
-                        self._appendLabeled(
-                            lines, "Bottom level", self._formatMeters(bottom_level, decimals=2)
-                        )
+                    bottom_text = self._formatLevelLabel(bottom_label)
+                    if not bottom_text:
+                        bottom_text = self._formatMeters(bottom_level, decimals=2)
+                    if bottom_text:
+                        lines.append(f"Bottom level: {bottom_text}")
 
                 # _input_label / _output_label are pre-formatted multi-line strings
-                # from the DB (e.g. '\nI1=2200.00\nI2=2200.00'); convert NL → <br>
-                # so they render in the RichText tooltip.
-                input_label = manhole_data.get("input_label")
-                if input_label:
-                    lines.append(
-                        "Entry level:" + str(input_label).replace("\n", "<br>&nbsp;&nbsp;")
-                    )
-                output_label = manhole_data.get("output_label")
-                if output_label:
-                    lines.append(
-                        "Exit level:" + str(output_label).replace("\n", "<br>&nbsp;&nbsp;")
-                    )
+                # from the DB (e.g. '\nI1=2200.00\nI2=2200.00'); render inline as
+                # '1: v1; 2: v2' so the tooltip stays compact.
+                input_text = self._formatLevelLabel(manhole_data.get("input_label"))
+                if input_text:
+                    lines.append(f"Entry level: {input_text}")
+                output_text = self._formatLevelLabel(manhole_data.get("output_label"))
+                if output_text:
+                    lines.append(f"Exit level: {output_text}")
                 if cover_level is not None and bottom_level is not None:
                     depth = cover_level - bottom_level
                     self._appendLabeled(lines, "Depth", self._formatMeters(depth, decimals=2))
@@ -982,6 +973,50 @@ class ProfileHoverManager:
     # ------------------------------------------------------------------
     # Formatting helpers
     # ------------------------------------------------------------------
+
+    def _parseLevelLabel(self, label):
+        """
+        Parse a DB level label into a list of (index, value) tuples.
+
+        The DB stores pre-formatted strings like '\\nC=3401.00' or
+        '\\nI1=2736.50\\nI2=2736.50'. We strip the letter prefix and keep
+        only the numeric value; a trailing digit on the prefix (I1, I2, …)
+        is captured as the index.
+        """
+        if label is None:
+            return []
+        entries = []
+        for raw in str(label).replace("\r", "\n").split("\n"):
+            token = raw.strip()
+            if not token:
+                continue
+            if "=" in token:
+                prefix, value = token.split("=", 1)
+                prefix = prefix.strip()
+                value = value.strip()
+                cut = len(prefix)
+                while cut > 0 and prefix[cut - 1].isdigit():
+                    cut -= 1
+                entries.append((prefix[cut:], value))
+            else:
+                entries.append(("", token))
+        return entries
+
+    def _formatLevelLabel(self, label):
+        """
+        Format a level label inline (no line breaks).
+
+        Single value → just the number; multiple values → '1: v1; 2: v2'.
+        """
+        entries = self._parseLevelLabel(label)
+        if not entries:
+            return None
+        if len(entries) == 1:
+            return entries[0][1]
+        parts = []
+        for i, (idx, value) in enumerate(entries):
+            parts.append(f"{idx or (i + 1)}: {value}")
+        return "; ".join(parts)
 
     def _formatMeters(self, value, decimals=2):
         if value is None:
