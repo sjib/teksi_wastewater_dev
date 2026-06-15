@@ -42,6 +42,8 @@ from qgis.PyQt.QtGui import QColor
 
 from ...utils.twwlayermanager import TwwLayerManager
 
+MANHOLE_DEFAULT_PX_WIDTH = 10
+
 
 class ProfileLayerSetup:
     """
@@ -60,6 +62,7 @@ class ProfileLayerSetup:
         self._temp_reach_layer = None  # Memory layer with Z values for vw_tww_reach
         self._temp_node_layer = None  # Node points: XY from ws geometry, Z = wn_bottom_level
         self._temp_cover_layer = None  # Cover points: XY from ws geometry, Z = co_level
+        self._structure_cache = []  # Cached ws features for manhole dash building
 
     # ------------------------------------------------------------------
     # Public API
@@ -87,14 +90,9 @@ class ProfileLayerSetup:
         project = QgsProject.instance()
         self._canvas.setProject(project)
 
-        # Build node/cover point layers from the structure view.
+        # Build node/cover point layers from the structure view (single pass).
         ws_source = TwwLayerManager.layer("vw_tww_wastewater_structure")
-        self._temp_node_layer = self._createStructurePointLayer(
-            ws_source, "wn_bottom_level", "wastewater_node_filtered", skip_zero=True
-        )
-        self._temp_cover_layer = self._createStructurePointLayer(
-            ws_source, "co_level", "cover_from_structure"
-        )
+        self._temp_node_layer, self._temp_cover_layer = self._buildStructurePointLayers(ws_source)
 
         # 2. Define the layers to use (based on working configuration)
         # profile_type: 'surface' = Continuous Surface, 'features' = Individual Features
@@ -262,6 +260,54 @@ class ProfileLayerSetup:
             except Exception:
                 pass
 
+    def buildManholeDashes(self, profile_curve_geom, tolerance, default_px_width=None):
+        """
+        Build manhole shaft overlay data along a profile curve.
+
+        Uses structure entries cached during setup() — no second layer scan.
+
+        :param profile_curve_geom: QgsGeometry of the profile path.
+        :param tolerance: Max distance from curve in map units.
+        :param default_px_width: Fallback shaft width in pixels.
+        :return: List of dash dicts for ManholeDashPlotItem.
+        """
+        if default_px_width is None:
+            default_px_width = MANHOLE_DEFAULT_PX_WIDTH
+        if profile_curve_geom is None or profile_curve_geom.isEmpty() or not self._structure_cache:
+            return []
+
+        dashes = []
+        for entry in self._structure_cache:
+            geometry = entry["geometry"]
+            try:
+                distance_along = profile_curve_geom.lineLocatePoint(geometry)
+            except Exception:
+                continue
+
+            if distance_along is None or distance_along < 0:
+                continue
+
+            try:
+                if profile_curve_geom.distance(geometry) > tolerance:
+                    continue
+            except Exception:
+                pass
+
+            dim1_mm = entry["dim1_mm"]
+            dashes.append(
+                {
+                    "distance": float(distance_along),
+                    "obj_id": entry["obj_id"],
+                    "cover_level": entry["cover_level"],
+                    "bottom_level": entry["bottom_level"],
+                    "cover_level_missing": entry["cover_level_missing"],
+                    "bottom_level_missing": entry["bottom_level_missing"],
+                    "width": manhole_dash_width(dim1_mm, default_px_width),
+                }
+            )
+
+        return dashes
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -355,59 +401,83 @@ class ProfileLayerSetup:
         mem_layer.updateExtents()
         return mem_layer
 
-    def _createStructurePointLayer(self, ws_layer, level_key, name, skip_zero=False):
+    def _buildStructurePointLayers(self, ws_layer):
         """
-        Build a PointZ memory layer for profile rendering from
-        vw_tww_wastewater_structure alone.
-
-        XY comes from the structure geometry — which the view defines as the
-        main wastewater node position, so it sits exactly on the profile
-        curve. Z comes from the level attribute (co_level / wn_bottom_level).
-        Structures without a level are skipped — deliberately NO fallback,
-        so missing data shows up as a missing point.
-
-        :param ws_layer: vw_tww_wastewater_structure layer
-        :param level_key: "wn_bottom_level" or "co_level"
-        :param name: name for the memory layer
-        :param skip_zero: also skip features whose level is exactly 0
-        :return: Memory layer, or None if the source is unavailable
+        Build node and cover PointZ memory layers in one pass over
+        vw_tww_wastewater_structure, caching entries for manhole dashes.
         """
         if ws_layer is None:
-            return None
+            self._structure_cache = []
+            return None, None
 
         crs = ws_layer.crs()
         crs_string = crs.authid() if crs.isValid() else "EPSG:2056"
 
-        mem_layer = QgsVectorLayer(f"PointZ?crs={crs_string}", name, "memory")
-        provider = mem_layer.dataProvider()
-        provider.addAttributes(ws_layer.fields().toList())
-        mem_layer.updateFields()
+        node_layer = QgsVectorLayer(
+            f"PointZ?crs={crs_string}", "wastewater_node_filtered", "memory"
+        )
+        cover_layer = QgsVectorLayer(f"PointZ?crs={crs_string}", "cover_from_structure", "memory")
 
-        features = []
+        for mem_layer in (node_layer, cover_layer):
+            provider = mem_layer.dataProvider()
+            provider.addAttributes(ws_layer.fields().toList())
+            mem_layer.updateFields()
+
+        node_features = []
+        cover_features = []
+        structure_cache = []
+
         for feat in ws_layer.getFeatures():
             attrs = _feature_attributes(feat)
-            level = _to_float(_pick_attr(attrs, [level_key]))
-            if level is None or (skip_zero and level == 0):
+            point_geom = _structure_profile_point(feat)
+            if point_geom is None:
                 continue
 
-            geom = feat.geometry()
-            if geom is None or geom.isEmpty():
-                continue
             try:
-                if geom.type() != Qgis.GeometryType.Point:
-                    geom = geom.centroid()
-                point = geom.asPoint()
+                point = point_geom.asPoint()
             except Exception:
                 continue
 
-            new_feat = QgsFeature()
-            new_feat.setGeometry(QgsGeometry(QgsPoint(point.x(), point.y(), level)))
-            new_feat.setAttributes(feat.attributes())
-            features.append(new_feat)
+            cover_level, bottom_level, cover_missing, bottom_missing = _manhole_level_state(
+                _to_float(_pick_attr(attrs, ["co_level"])),
+                _to_float(_pick_attr(attrs, ["wn_bottom_level"])),
+            )
 
-        provider.addFeatures(features)
-        mem_layer.updateExtents()
-        return mem_layer
+            if bottom_level is not None:
+                node_feat = QgsFeature()
+                node_feat.setGeometry(
+                    QgsGeometry(QgsPoint(point.x(), point.y(), bottom_level))
+                )
+                node_feat.setAttributes(feat.attributes())
+                node_features.append(node_feat)
+
+            if cover_level is not None:
+                cover_feat = QgsFeature()
+                cover_feat.setGeometry(
+                    QgsGeometry(QgsPoint(point.x(), point.y(), cover_level))
+                )
+                cover_feat.setAttributes(feat.attributes())
+                cover_features.append(cover_feat)
+
+            if not (cover_missing and bottom_missing):
+                structure_cache.append(
+                    {
+                        "geometry": point_geom,
+                        "obj_id": _pick_attr(attrs, ["wn_obj_id"]),
+                        "cover_level": cover_level,
+                        "bottom_level": bottom_level,
+                        "cover_level_missing": cover_missing,
+                        "bottom_level_missing": bottom_missing,
+                        "dim1_mm": _to_float(_pick_attr(attrs, ["ma_dimension1"])),
+                    }
+                )
+
+        node_layer.dataProvider().addFeatures(node_features)
+        cover_layer.dataProvider().addFeatures(cover_features)
+        node_layer.updateExtents()
+        cover_layer.updateExtents()
+        self._structure_cache = structure_cache
+        return node_layer, cover_layer
 
     def _configureLayerSymbols(self, elevation_props, style, layer_name):
         """
@@ -538,3 +608,45 @@ def _to_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _structure_profile_point(feat):
+    """Return a point QgsGeometry for profile placement, or None."""
+    geom = feat.geometry()
+    if geom is None or geom.isEmpty():
+        return None
+    try:
+        if geom.type() != Qgis.GeometryType.Point:
+            geom = geom.centroid()
+        if geom is None or geom.isEmpty():
+            return None
+        return geom
+    except Exception:
+        return None
+
+
+def _manhole_level_state(cover_level, bottom_level):
+    """
+    Parse cover/bottom levels and missing flags.
+
+    :return: (cover_level, bottom_level, cover_missing, bottom_missing)
+    """
+    cover_missing = cover_level is None
+    bottom_missing = bottom_level is None or bottom_level == 0
+    if bottom_missing:
+        bottom_level = None
+    return cover_level, bottom_level, cover_missing, bottom_missing
+
+
+def _resolve_manhole_anchors(cover_level, bottom_level):
+    """When one level is missing, anchor drawing/hit-test at the known level."""
+    anchor_cover = cover_level if cover_level is not None else bottom_level
+    anchor_bottom = bottom_level if bottom_level is not None else cover_level
+    return anchor_cover, anchor_bottom
+
+
+def manhole_dash_width(dim1_mm, default_px=MANHOLE_DEFAULT_PX_WIDTH):
+    """Shaft line width in pixels from ma_dimension1 (mm)."""
+    if dim1_mm is None:
+        return default_px
+    return max(6.0, min(16.0, float(dim1_mm) / 100.0))

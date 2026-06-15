@@ -26,10 +26,16 @@ from qgis.core import QgsFeatureRequest
 from qgis.gui import QgsHighlight
 from qgis.PyQt.QtCore import QPoint, QPointF, Qt
 from qgis.PyQt.QtGui import QColor
-from qgis.PyQt.QtWidgets import QLabel, QToolTip
+from qgis.PyQt.QtWidgets import QLabel
 
 from ...utils.twwlayermanager import TwwLayerManager
-from .layer_setup import _feature_attributes, _pick_attr, _to_float
+from .layer_setup import (
+    MANHOLE_DEFAULT_PX_WIDTH,
+    _feature_attributes,
+    _pick_attr,
+    _resolve_manhole_anchors,
+    _to_float,
+)
 
 
 class ProfileHoverManager:
@@ -97,8 +103,6 @@ class ProfileHoverManager:
         """
         if hasattr(self._canvas, "setSnappingEnabled"):
             self._canvas.setSnappingEnabled(True)
-        if hasattr(self._canvas, "canvasPointHovered"):
-            self._canvas.canvasPointHovered.connect(self._onCanvasPointHovered)
 
     # ------------------------------------------------------------------
     # Event handlers (called by TwwElevationProfileCanvas callbacks)
@@ -124,19 +128,12 @@ class ProfileHoverManager:
         """Clear all hover state: tooltip, highlight, last match."""
         self._last_hover_match = None
         self._last_tooltip_text = None
-        QToolTip.hideText()
         self._custom_tooltip.hide()
         self._clearHighlight()
 
     # ------------------------------------------------------------------
     # Internal hover pipeline
     # ------------------------------------------------------------------
-
-    def _onCanvasPointHovered(self, _map_point, profile_point):
-        """Handle hover signal from QgsElevationProfileCanvas (official API)."""
-        if not self._hover_enabled:
-            return
-        self._updateHoverMatch(profile_point)
 
     def _handleCanvasHover(self, pos):
         """Handle hover using raw canvas pixel coordinates."""
@@ -207,7 +204,10 @@ class ProfileHoverManager:
         :param plot_point: QPointF with (distance, elevation) in plot coordinates.
         :return: Fake identify-result dict, or None if no match.
         """
-        if not hasattr(self._canvas, "_manhole_dashes") or not self._canvas._manhole_dashes:
+        if not hasattr(self._canvas, "getManholeDashes"):
+            return None
+        manhole_dashes = self._canvas.getManholeDashes()
+        if not manhole_dashes:
             return None
 
         distance = plot_point.x()
@@ -219,18 +219,22 @@ class ProfileHoverManager:
         best_match = None
         best_distance2 = float("inf")
 
-        for dash in self._canvas._manhole_dashes:
+        default_width = (
+            self._canvas.manholeDefaultPxWidth()
+            if hasattr(self._canvas, "manholeDefaultPxWidth")
+            else MANHOLE_DEFAULT_PX_WIDTH
+        )
+
+        for dash in manhole_dashes:
             dash_distance = dash.get("distance")
             cover_level = dash.get("cover_level")
             bottom_level = dash.get("bottom_level")
-            width_px = dash.get("width", 10)
+            width_px = dash.get("width", default_width)
 
             if dash_distance is None or (cover_level is None and bottom_level is None):
                 continue
 
-            # A missing level is anchored at the known one (matches the red-X drawing).
-            eff_cover = cover_level if cover_level is not None else bottom_level
-            eff_bottom = bottom_level if bottom_level is not None else cover_level
+            eff_cover, eff_bottom = _resolve_manhole_anchors(cover_level, bottom_level)
 
             dist_diff = abs(distance - dash_distance)
             if dist_diff > tolerance_dist:
@@ -377,7 +381,6 @@ class ProfileHoverManager:
         should_hide = plot_point is None or match is None
 
         if should_hide:
-            QToolTip.hideText()
             self._custom_tooltip.hide()
             self._last_hover_global_pos = None
             self._last_tooltip_text = None
@@ -385,20 +388,16 @@ class ProfileHoverManager:
 
         text = self._formatHoverSummary(plot_point, match)
         if not text:
-            QToolTip.hideText()
             self._custom_tooltip.hide()
             self._last_hover_global_pos = None
             self._last_tooltip_text = None
             return
 
-        current_layer = match.get("layer_name", "")
-        current_fid = match.get("feature_id", "")
-        same_feature = False
-
-        if self._last_hover_match:
-            last_layer = self._last_hover_match.get("layer_name", "")
-            last_fid = self._last_hover_match.get("feature_id", "")
-            same_feature = current_layer == last_layer and current_fid == last_fid
+        current_key = self._matchIdentityKey(match)
+        same_feature = (
+            self._last_hover_match is not None
+            and self._matchIdentityKey(self._last_hover_match) == current_key
+        )
 
         from qgis.PyQt.QtGui import QCursor
 
@@ -430,21 +429,7 @@ class ProfileHoverManager:
 
     def _formatHoverSummary(self, plot_point, match):
         """Build rich-text tooltip content for a hover match."""
-        result = match.get("result") if match else None
-        layer = match.get("layer") if match else None
-        layer_name = layer.name() if layer and hasattr(layer, "name") else ""
-        feature = self._extractResultFeature(result, layer)
-        result_attrs = self._extractResultAttributes(result)
-
-        if feature:
-            attrs = _feature_attributes(feature)
-        else:
-            attrs = result_attrs
-
-        if result_attrs:
-            for key in ["distance", "elevation", "delta"]:
-                if key in result_attrs and key not in attrs:
-                    attrs[key] = result_attrs[key]
+        attrs, layer_name, feature, _layer = self._attrsFromMatch(match)
 
         lines = []
 
@@ -737,17 +722,7 @@ class ProfileHoverManager:
         if self._map_canvas is None:
             return
 
-        result = match.get("result") if match else None
-        layer = match.get("layer") if match else None
-        layer_name = layer.name() if layer and hasattr(layer, "name") else ""
-        feature = self._extractResultFeature(result, layer)
-        result_attrs = self._extractResultAttributes(result)
-
-        attrs = _feature_attributes(feature) if feature else result_attrs
-        if result_attrs:
-            for key in result_attrs:
-                if key not in attrs:
-                    attrs[key] = result_attrs[key]
+        attrs, layer_name, _feature, _layer = self._attrsFromMatch(match)
 
         is_reach = self._isReachHover(layer_name, attrs)
         is_cover = self._isCoverHover(layer_name, attrs)
@@ -856,6 +831,54 @@ class ProfileHoverManager:
     # ------------------------------------------------------------------
     # Attribute extraction helpers
     # ------------------------------------------------------------------
+
+    def _attrsFromMatch(self, match):
+        """Extract merged attributes, layer name, feature, and layer from a hover match."""
+        result = match.get("result") if match else None
+        layer = match.get("layer") if match else None
+        layer_name = layer.name() if layer and hasattr(layer, "name") else ""
+        feature = self._extractResultFeature(result, layer)
+        result_attrs = self._extractResultAttributes(result)
+
+        if feature:
+            attrs = _feature_attributes(feature)
+        else:
+            attrs = dict(result_attrs)
+
+        for key, value in result_attrs.items():
+            if key not in attrs:
+                attrs[key] = value
+
+        return attrs, layer_name, feature, layer
+
+    def _matchIdentityKey(self, match):
+        """Stable identity for tooltip deduplication (layer feature or manhole dash)."""
+        if not match:
+            return None
+
+        layer = match.get("layer")
+        result = match.get("result")
+        if layer is not None and hasattr(layer, "id"):
+            feature = self._extractResultFeature(result, layer)
+            if feature is not None and hasattr(feature, "id"):
+                return ("layer", layer.id(), feature.id())
+            if isinstance(result, dict):
+                fid = result.get("featureId") or result.get("fid") or result.get("id")
+                if fid is not None:
+                    return ("layer", layer.id(), fid)
+            return ("layer", layer.id(), None)
+
+        if isinstance(result, dict):
+            attrs = result.get("attributes") or {}
+            if attrs.get("_is_manhole_dash"):
+                obj_id = attrs.get("obj_id")
+                if obj_id:
+                    return ("dash", obj_id)
+                distance = result.get("distance")
+                if distance is not None:
+                    return ("dash", distance)
+
+        return None
 
     def _extractResultAttributes(self, result):
         """Extract attribute dict from a QgsElevationProfile identify result."""

@@ -27,6 +27,8 @@ from qgis.PyQt.QtCore import QPointF, QRectF, Qt
 from qgis.PyQt.QtGui import QColor, QPainter, QPen
 from qgis.gui import QgsElevationProfileCanvas, QgsPlotCanvasItem
 
+from .layer_setup import MANHOLE_DEFAULT_PX_WIDTH, _resolve_manhole_anchors
+
 
 class ManholeDashPlotItem(QgsPlotCanvasItem):
     """
@@ -57,6 +59,9 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         self._dashes = dashes or []
         self.update()
 
+    def dashes(self):
+        return self._dashes
+
     def _plotPointToCanvasPoint(self, distance, elevation):
         if not hasattr(self._canvas, "plotPointToCanvasPoint"):
             return None
@@ -71,6 +76,13 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             return None
         return QPointF(canvas_point.x(), canvas_point.y())
 
+    def _drawCoverLine(self, painter, cover_pt, half_width, cover_pen):
+        painter.setPen(cover_pen)
+        painter.drawLine(
+            QPointF(cover_pt.x() - half_width - 3, cover_pt.y()),
+            QPointF(cover_pt.x() + half_width + 3, cover_pt.y()),
+        )
+
     def paint(self, painter, option=None, widget=None):
         if painter is None or not painter.isActive() or not self._dashes:
             return
@@ -80,7 +92,7 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
 
         shaft_color = getattr(self._canvas, "_manhole_shaft_color", QColor("#6E4C1E"))
         cover_color = getattr(self._canvas, "_manhole_cover_color", QColor("#2C3E50"))
-        default_px_width = getattr(self._canvas, "_manhole_default_px_width", 10)
+        default_px_width = getattr(self._canvas, "_manhole_default_px_width", MANHOLE_DEFAULT_PX_WIDTH)
 
         shaft_pen = QPen(shaft_color, 1.5)
         shaft_pen.setStyle(Qt.PenStyle.SolidLine)
@@ -95,14 +107,13 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             cover_level = dash.get("cover_level")
             bottom_level = dash.get("bottom_level")
             shaft_width_px = dash.get("width", default_px_width)
-            cover_missing = dash.get("cover_level_missing", False) or cover_level is None
-            bottom_missing = dash.get("bottom_level_missing", False) or bottom_level is None
+            cover_missing = dash.get("cover_level_missing", False)
+            bottom_missing = dash.get("bottom_level_missing", False)
 
             if distance is None or (cover_level is None and bottom_level is None):
                 continue
 
-            anchor_cover = cover_level if cover_level is not None else bottom_level
-            anchor_bottom = bottom_level if bottom_level is not None else cover_level
+            anchor_cover, anchor_bottom = _resolve_manhole_anchors(cover_level, bottom_level)
 
             cover_pt = self._plotPointToCanvasPoint(distance, anchor_cover)
             bottom_pt = self._plotPointToCanvasPoint(distance, anchor_bottom)
@@ -126,17 +137,9 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                 painter.drawLine(right_top, right_bottom)
                 painter.drawLine(left_bottom, right_bottom)
 
-                painter.setPen(cover_pen)
-                painter.drawLine(
-                    QPointF(cover_pt.x() - half_width - 3, cover_pt.y()),
-                    QPointF(cover_pt.x() + half_width + 3, cover_pt.y()),
-                )
+                self._drawCoverLine(painter, cover_pt, half_width, cover_pen)
             elif bottom_missing:
-                painter.setPen(cover_pen)
-                painter.drawLine(
-                    QPointF(cover_pt.x() - half_width - 3, cover_pt.y()),
-                    QPointF(cover_pt.x() + half_width + 3, cover_pt.y()),
-                )
+                self._drawCoverLine(painter, cover_pt, half_width, cover_pen)
                 self._drawMissingDataX(
                     painter, QPointF(cover_pt.x(), cover_pt.y() + 18.0)
                 )
@@ -169,14 +172,13 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
     Custom elevation profile canvas to ensure mouse move events reach hover logic.
     """
 
-    def __init__(self, parent=None, hover_callback=None, leave_callback=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._hover_callback = hover_callback
-        self._leave_callback = leave_callback
-        self._manhole_dashes = []
+        self._hover_callback = None
+        self._leave_callback = None
         self._manhole_shaft_color = QColor("#6E4C1E")  # Brown color for manhole shaft walls
         self._manhole_cover_color = QColor("#2C3E50")  # Dark gray for manhole cover
-        self._manhole_default_px_width = 10  # Default pixel width for manhole shaft
+        self._manhole_default_px_width = MANHOLE_DEFAULT_PX_WIDTH
         self.setMouseTracking(True)
         if hasattr(self, "viewport"):
             try:
@@ -194,6 +196,19 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
         self._manhole_item = ManholeDashPlotItem(self)
         if hasattr(self, "plotAreaChanged"):
             self.plotAreaChanged.connect(self._onPlotAreaChanged)
+
+    def setHoverHandlers(self, move_handler, leave_handler):
+        """Wire hover/leave handlers after ProfileHoverManager is created."""
+        self._hover_callback = move_handler
+        self._leave_callback = leave_handler
+
+    def manholeDefaultPxWidth(self):
+        return self._manhole_default_px_width
+
+    def getManholeDashes(self):
+        if self._manhole_item is None:
+            return []
+        return self._manhole_item.dashes()
 
     def _onPlotAreaChanged(self):
         if self._manhole_item is not None:
@@ -215,6 +230,5 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
             self._leave_callback(event)
 
     def setManholeDashes(self, dashes):
-        self._manhole_dashes = dashes or []
         if self._manhole_item is not None:
-            self._manhole_item.setDashes(self._manhole_dashes)
+            self._manhole_item.setDashes(dashes or [])

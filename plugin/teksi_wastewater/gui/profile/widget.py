@@ -22,15 +22,15 @@
 #
 # ---------------------------------------------------------------------
 
-from qgis.core import Qgis, QgsFeatureRequest, QgsGeometry, QgsLineString
-from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.core import QgsFeatureRequest, QgsGeometry, QgsLineString
+from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.QtWidgets import QVBoxLayout, QWidget
 
 from ...tools.twwnetwork import TwwGraphManager
 from ...utils.twwlayermanager import TwwLayerManager
 from .canvas import TwwElevationProfileCanvas
 from .hover_manager import ProfileHoverManager
-from .layer_setup import ProfileLayerSetup, _feature_attributes, _pick_attr, _to_float
+from .layer_setup import ProfileLayerSetup
 
 
 class TwwElevationProfileWidget(QWidget):
@@ -59,9 +59,7 @@ class TwwElevationProfileWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         # Canvas (custom subclass)
-        self.canvas = TwwElevationProfileCanvas(
-            self, self._onCanvasMouseMove, self._onCanvasLeave
-        )
+        self.canvas = TwwElevationProfileCanvas(self)
         layout.addWidget(self.canvas)
 
         # Compatibility / misc state
@@ -84,16 +82,10 @@ class TwwElevationProfileWidget(QWidget):
 
         self._hover_manager = ProfileHoverManager(self.canvas, map_canvas)
         self._hover_manager.setup()
-
-    # ------------------------------------------------------------------
-    # Canvas event routing
-    # ------------------------------------------------------------------
-
-    def _onCanvasMouseMove(self, event):
-        self._hover_manager.onCanvasMouseMove(event)
-
-    def _onCanvasLeave(self, event):
-        self._hover_manager.onCanvasLeave(event)
+        self.canvas.setHoverHandlers(
+            self._hover_manager.onCanvasMouseMove,
+            self._hover_manager.onCanvasLeave,
+        )
 
     # ------------------------------------------------------------------
     # Public API (called by TwwProfileDockWidget)
@@ -124,8 +116,7 @@ class TwwElevationProfileWidget(QWidget):
         Called by TwwProfileDockWidget when the user clicks the Clear Canvas button.
         Safely clears all profile-related state without crashing.
         """
-        if hasattr(self.canvas, "cancelJobs"):
-            self.canvas.cancelJobs()
+        self._cancelCanvasJobs()
 
         self._hover_manager.clearState()
         self.canvas.setManholeDashes([])
@@ -135,9 +126,11 @@ class TwwElevationProfileWidget(QWidget):
         empty_curve = QgsLineString()
         self.canvas.setProfileCurve(empty_curve)
 
-        if hasattr(self.canvas, "invalidateCurrentPlotExtent"):
-            self.canvas.invalidateCurrentPlotExtent()
-        self.canvas.refresh()
+        self._invalidateAndRefreshCanvas()
+
+    def clearHighlight(self):
+        """Clear hover tooltip and map highlight (e.g. when dock closes)."""
+        self._hover_manager.clearState()
 
     def setProfileCurve(self, geometry):
         """
@@ -153,7 +146,6 @@ class TwwElevationProfileWidget(QWidget):
 
         # Clean up old state before setting new profile
         self._hover_manager.clearState()
-        self.canvas.setManholeDashes([])
 
         curve = QgsLineString(points)
 
@@ -171,15 +163,20 @@ class TwwElevationProfileWidget(QWidget):
         else:
             self._layer_setup.applyCanvasTolerance(self._manhole_dash_tolerance)
 
-        if hasattr(self.canvas, "cancelJobs"):
-            self.canvas.cancelJobs()
+        self._cancelCanvasJobs()
         if hasattr(self.canvas, "invalidateCurrentPlotExtent"):
             self.canvas.invalidateCurrentPlotExtent()
         self.canvas.setProfileCurve(curve)
         self.canvas.refresh()
 
         self._profile_curve_geom = geometry
-        self._refreshManholeDashes()
+        self.canvas.setManholeDashes(
+            self._layer_setup.buildManholeDashes(
+                self._profile_curve_geom,
+                self._manhole_dash_tolerance,
+                self.canvas.manholeDefaultPxWidth(),
+            )
+        )
 
         def delayedZoomFull():
             if hasattr(self.canvas, "zoomFull"):
@@ -254,100 +251,14 @@ class TwwElevationProfileWidget(QWidget):
             self.setProfileCurve(profile_geometry)
 
     # ------------------------------------------------------------------
-    # Manhole dashes (profile data construction, stays in widget)
+    # Canvas helpers
     # ------------------------------------------------------------------
 
-    def _refreshManholeDashes(self):
-        """Build vertical shaft data (cover → bottom) for manholes along the profile curve."""
-        if self._profile_curve_geom is None or self._profile_curve_geom.isEmpty():
-            self.canvas.setManholeDashes([])
-            return
+    def _cancelCanvasJobs(self):
+        if hasattr(self.canvas, "cancelJobs"):
+            self.canvas.cancelJobs()
 
-        # Single source: vw_tww_wastewater_structure. Its geometry is the main
-        # wastewater node position (COALESCE(wn.situation3d_geometry, main
-        # cover)), so it sits exactly on the profile curve and replaces the
-        # former vw_wastewater_node scan entirely. Levels come from co_level /
-        # wn_bottom_level with deliberately NO fallback — a missing level is
-        # flagged and rendered as a red X so the data gap stays visible.
-        ws_layer = TwwLayerManager.layer("vw_tww_wastewater_structure")
-        if ws_layer is None:
-            self.canvas.setManholeDashes([])
-            return
-
-        dashes = []
-        for feature in ws_layer.getFeatures():
-            geometry = feature.geometry()
-            if geometry is None or geometry.isEmpty():
-                continue
-            attrs = _feature_attributes(feature)
-
-            cover_level = _to_float(_pick_attr(attrs, ["co_level"]))
-            bottom_level = _to_float(_pick_attr(attrs, ["wn_bottom_level"]))
-            cover_level_missing = cover_level is None
-            bottom_level_missing = bottom_level is None or bottom_level == 0
-            if bottom_level_missing:
-                bottom_level = None
-            # Both levels missing: no elevation to anchor a marker to.
-            if cover_level_missing and bottom_level_missing:
-                continue
-
-            if geometry.type() != Qgis.GeometryType.Point:
-                try:
-                    geometry = geometry.centroid()
-                except Exception:
-                    continue
-
-            try:
-                distance_along = self._profile_curve_geom.lineLocatePoint(geometry)
-            except Exception:
-                continue
-
-            if distance_along is None or distance_along < 0:
-                continue
-
-            try:
-                if self._profile_curve_geom.distance(geometry) > self._manhole_dash_tolerance:
-                    continue
-            except Exception:
-                pass
-
-            dim1_mm = _to_float(_pick_attr(attrs, ["ma_dimension1"]))
-            line_width = self._manholeDashWidth(dim1_mm)
-            dashes.append(
-                {
-                    "distance": float(distance_along),
-                    # Keep the node obj_id (wn_obj_id) — downstream hover code
-                    # treats dash obj_id as a wastewater node id.
-                    "obj_id": _pick_attr(attrs, ["wn_obj_id"]),
-                    "cover_level": cover_level,
-                    "bottom_level": bottom_level,
-                    "cover_level_missing": cover_level_missing,
-                    "bottom_level_missing": bottom_level_missing,
-                    "width": line_width,
-                }
-            )
-
-        self.canvas.setManholeDashes(dashes)
-
-    def _manholeDashWidth(self, dim1_mm):
-        """
-        Calculate the pixel width for a manhole shaft.
-
-        :param dim1_mm: Shaft diameter / first dimension in millimetres
-            (from vw_tww_wastewater_structure.ma_dimension1). None when the
-            structure has no recorded dimension (e.g. special_structure).
-        :return: Line width in pixels (mm/100, clamped 6–16px). Falls back to
-            canvas default (~10px) when dim1_mm is missing.
-
-        TODO: switch to true-scale rendering once Pipe Band lands —
-            half_px = (dim1_mm / 1000.0) * px_per_m / 2.0, clamped >= 2px.
-            See profile/reference.md §5.2.
-        """
-        default_px = (
-            self.canvas._manhole_default_px_width
-            if hasattr(self.canvas, "_manhole_default_px_width")
-            else 10
-        )
-        if dim1_mm is None:
-            return default_px
-        return max(6.0, min(16.0, float(dim1_mm) / 100.0))
+    def _invalidateAndRefreshCanvas(self):
+        if hasattr(self.canvas, "invalidateCurrentPlotExtent"):
+            self.canvas.invalidateCurrentPlotExtent()
+        self.canvas.refresh()

@@ -588,8 +588,8 @@ class TeksiWastewaterPlugin:
             canvas.setExtent(saved_extent)
 
         # Clear elevation profile widget highlight
-        if self.plotWidget and hasattr(self.plotWidget, '_clearHighlight'):
-            self.plotWidget._clearHighlight()
+        if self.plotWidget and hasattr(self.plotWidget, "clearHighlight"):
+            self.plotWidget.clearHighlight()
 
         self.profileAction.setChecked(False)
         self.profile_dock = None
