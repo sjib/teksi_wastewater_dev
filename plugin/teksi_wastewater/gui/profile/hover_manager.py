@@ -30,9 +30,7 @@ from qgis.PyQt.QtWidgets import QLabel
 
 from ...utils.twwlayermanager import TwwLayerManager
 from .layer_setup import (
-    MANHOLE_DEFAULT_PX_WIDTH,
     _feature_attributes,
-    _pick_attr,
     _resolve_manhole_anchors,
     _to_float,
 )
@@ -63,6 +61,24 @@ class ProfileHoverManager:
     REACH_SLOPE_PER_MILL = "_slope_per_mill"
     REACH_RP_FROM_LEVEL = "rp_from_level"
     REACH_RP_TO_LEVEL = "rp_to_level"
+
+    # Canonical main-cover fields on vw_tww_wastewater_structure (co_* from main_co).
+    COVER_OBJ_ID = "co_obj_id"
+    COVER_LEVEL = "co_level"
+    COVER_MATERIAL = "co_material"
+    COVER_SHAPE = "co_shape"
+    COVER_BRAND = "co_brand"
+
+    # Canonical vw_tww_wastewater_structure fields for manhole hover tooltips.
+    MANHOLE_OBJ_ID = "obj_id"
+    MANHOLE_WS_TYPE = "ws_type"
+    MANHOLE_CO_LEVEL = "co_level"
+    MANHOLE_BOTTOM_LEVEL = "wn_bottom_level"
+    MANHOLE_COVER_LABEL = "_cover_label"
+    MANHOLE_BOTTOM_LABEL = "_bottom_label"
+    MANHOLE_INPUT_LABEL = "_input_label"
+    MANHOLE_OUTPUT_LABEL = "_output_label"
+    MANHOLE_DIMENSION1 = "ma_dimension1"
 
     def __init__(self, canvas, map_canvas):
         """
@@ -230,17 +246,10 @@ class ProfileHoverManager:
         best_match = None
         best_distance2 = float("inf")
 
-        default_width = (
-            self._canvas.manholeDefaultPxWidth()
-            if hasattr(self._canvas, "manholeDefaultPxWidth")
-            else MANHOLE_DEFAULT_PX_WIDTH
-        )
-
         for dash in manhole_dashes:
             dash_distance = dash.get("distance")
             cover_level = dash.get("cover_level")
             bottom_level = dash.get("bottom_level")
-            width_px = dash.get("width", default_width)
 
             if dash_distance is None or (cover_level is None and bottom_level is None):
                 continue
@@ -269,12 +278,16 @@ class ProfileHoverManager:
                         "feature": None,
                         "attributes": {
                             "obj_id": dash.get("obj_id"),
-                            "cover_level": cover_level,
-                            "bottom_level": bottom_level,
+                            "ws_type": dash.get("ws_type", "manhole"),
+                            "co_level": cover_level,
+                            "wn_bottom_level": bottom_level,
                             "cover_level_missing": dash.get("cover_level_missing", False),
                             "bottom_level_missing": dash.get("bottom_level_missing", False),
-                            "width": width_px,
-                            "node_type": "manhole",
+                            "_cover_label": dash.get("_cover_label"),
+                            "_bottom_label": dash.get("_bottom_label"),
+                            "_input_label": dash.get("_input_label"),
+                            "_output_label": dash.get("_output_label"),
+                            "ma_dimension1": dash.get("dim1_mm"),
                             "_is_manhole_dash": True,
                         },
                         "distance": dash_distance,
@@ -492,93 +505,73 @@ class ProfileHoverManager:
                 lines.append(f"Elevation at cursor: {plot_point.y():.2f} m")
 
         elif is_cover:
-            obj_id = _pick_attr(attrs, ["obj_id", "objId", "id"])
-            lines.append(f"Cover {obj_id}" if obj_id else "Cover")
-            cover_data = self._getCoverEnhancedData(attrs)
-            level = cover_data.get("level") or _to_float(
-                _pick_attr(attrs, ["level", "cover_level"])
-            )
-            self._appendLabeled(lines, "Level", self._formatMeters(level, decimals=2))
-            self._appendLabeled(
-                lines, "Material", cover_data.get("material") or _pick_attr(attrs, ["material"])
-            )
-            self._appendLabeled(
-                lines,
-                "Cover shape",
-                cover_data.get("cover_shape") or _pick_attr(attrs, ["cover_shape"]),
-            )
-            self._appendLabeled(
-                lines, "Brand", cover_data.get("brand") or _pick_attr(attrs, ["brand"])
-            )
+            cover_obj_id = attrs.get(self.COVER_OBJ_ID)
+            lines.append(f"Cover {cover_obj_id}" if cover_obj_id else "Cover")
+
+            level = _to_float(attrs.get(self.COVER_LEVEL))
+            if level is None:
+                lines.append(f"Level: {self.MISSING_DATA_HTML}")
+            else:
+                lines.append(f"Level: {self._formatMeters(level, decimals=2)}")
+
+            material = attrs.get(self.COVER_MATERIAL)
+            if material is None or material == "":
+                lines.append(f"Material: {self.MISSING_DATA_HTML}")
+            else:
+                lines.append(f"Material: {material}")
+
+            cover_shape = attrs.get(self.COVER_SHAPE)
+            if cover_shape is None or cover_shape == "":
+                lines.append(f"Cover shape: {self.MISSING_DATA_HTML}")
+            else:
+                lines.append(f"Cover shape: {cover_shape}")
+
+            brand = attrs.get(self.COVER_BRAND)
+            if brand is None or brand == "":
+                lines.append(f"Brand: {self.MISSING_DATA_HTML}")
+            else:
+                lines.append(f"Brand: {brand}")
 
         elif is_manhole:
-            node_type = str(_pick_attr(attrs, ["node_type", "nodeType", "type"]) or "").lower()
-            is_actual_manhole = "manhole" in node_type
-            obj_id = _pick_attr(attrs, ["obj_id", "objId", "id", "ws_obj_id"])
+            ws_type = str(attrs.get(self.MANHOLE_WS_TYPE) or "").lower()
+            is_actual_manhole = ws_type == "manhole"
+            obj_id = attrs.get(self.MANHOLE_OBJ_ID)
 
             if is_actual_manhole:
                 lines.append(f"Manhole: {obj_id}" if obj_id else "Manhole")
-                manhole_data = self._getManholeEnhancedData(obj_id, attrs)
-
-                # Cover / Bottom: prefer DB-pre-formatted label (handles multi-cover etc.);
-                # fall back to numeric format if the label field is missing.
-                cover_level = manhole_data.get("cover_level")
-                cover_level_missing = (
-                    manhole_data.get("cover_level_missing", False)
-                    or attrs.get("cover_level_missing", False)
-                    or cover_level is None
+                self._appendManholeLabelLine(
+                    lines, "Cover level", attrs.get(self.MANHOLE_COVER_LABEL)
                 )
-                cover_label = manhole_data.get("cover_label")
-                if cover_level_missing:
-                    lines.append('Cover level: <span style="color:red">Missing Data</span>')
-                else:
-                    cover_text = self._formatLevelLabel(cover_label)
-                    if not cover_text:
-                        cover_text = self._formatMeters(cover_level, decimals=2)
-                    if cover_text:
-                        lines.append(f"Cover level: {cover_text}")
-
-                bottom_level = manhole_data.get("bottom_level")
-                bottom_level_missing = (
-                    manhole_data.get("bottom_level_missing", False)
-                    or attrs.get("bottom_level_missing", False)
-                    or bottom_level is None
-                    or bottom_level == 0
+                self._appendManholeLabelLine(
+                    lines, "Bottom level", attrs.get(self.MANHOLE_BOTTOM_LABEL)
                 )
-                if bottom_level_missing:
-                    lines.append('Bottom level: <span style="color:red">Missing Data</span>')
-                else:
-                    bottom_label = manhole_data.get("bottom_label")
-                    bottom_text = self._formatLevelLabel(bottom_label)
-                    if not bottom_text:
-                        bottom_text = self._formatMeters(bottom_level, decimals=2)
-                    if bottom_text:
-                        lines.append(f"Bottom level: {bottom_text}")
+                self._appendManholeLabelLine(
+                    lines, "Entry level", attrs.get(self.MANHOLE_INPUT_LABEL)
+                )
+                self._appendManholeLabelLine(
+                    lines, "Exit level", attrs.get(self.MANHOLE_OUTPUT_LABEL)
+                )
 
-                # _input_label / _output_label are pre-formatted multi-line strings
-                # from the DB (e.g. '\nI1=2200.00\nI2=2200.00'); render inline as
-                # '1: v1; 2: v2' so the tooltip stays compact.
-                input_text = self._formatLevelLabel(manhole_data.get("input_label"))
-                if input_text:
-                    lines.append(f"Entry level: {input_text}")
-                output_text = self._formatLevelLabel(manhole_data.get("output_label"))
-                if output_text:
-                    lines.append(f"Exit level: {output_text}")
+                cover_level = self._manholeCoverLevelValue(attrs)
+                bottom_level = self._manholeBottomLevelValue(attrs)
                 if cover_level is not None and bottom_level is not None:
                     depth = cover_level - bottom_level
-                    self._appendLabeled(lines, "Depth", self._formatMeters(depth, decimals=2))
-                width = manhole_data.get("width")
-                if width is not None:
-                    lines.append(f"Width: {width:.0f} mm")
+                    lines.append(f"Depth: {self._formatMeters(depth, decimals=2)}")
+                else:
+                    lines.append(f"Depth: {self.MISSING_DATA_HTML}")
+
+                width_mm = _to_float(attrs.get(self.MANHOLE_DIMENSION1))
+                if width_mm is None:
+                    lines.append(f"Width: {self.MISSING_DATA_HTML}")
+                else:
+                    lines.append(f"Width: {width_mm:.0f} mm")
             else:
                 lines.append(f"Node: {obj_id}" if obj_id else "Node")
-                if node_type:
-                    lines.append(f"Type: {node_type}")
-                bottom_level = _to_float(
-                    _pick_attr(attrs, ["bottom_level", "bottomLevel", "level", "invert_level"])
-                )
-                if bottom_level is None or bottom_level == 0:
-                    lines.append('Bottom level: <span style="color:red">Missing Data</span>')
+                if ws_type:
+                    lines.append(f"Type: {ws_type}")
+                bottom_level = self._manholeBottomLevelValue(attrs)
+                if bottom_level is None:
+                    lines.append(f"Level: {self.MISSING_DATA_HTML}")
                 else:
                     lines.append(f"Level: {bottom_level:.2f} m")
         else:
@@ -618,7 +611,7 @@ class ProfileHoverManager:
         if attrs and attrs.get("_is_manhole_dash"):
             return True
         layer_name_lower = (layer_name or "").lower()
-        if "wastewater_node" in layer_name_lower or "manhole" in layer_name_lower:
+        if "wastewater_node" in layer_name_lower:
             return True
         if "reach" in layer_name_lower:
             return False
@@ -626,93 +619,7 @@ class ProfileHoverManager:
             return False
         if "change_point" in layer_name_lower:
             return False
-        node_type = str(_pick_attr(attrs, ["node_type", "nodeType", "type"]) or "").lower()
-        if "manhole" in node_type:
-            return True
-        has_cover = _pick_attr(attrs, ["cover_level"]) is not None
-        has_bottom = _pick_attr(attrs, ["bottom_level"]) is not None
-        return has_cover and has_bottom
-
-    # ------------------------------------------------------------------
-    # Data enrichment (layer queries)
-    # ------------------------------------------------------------------
-
-    def _getCoverEnhancedData(self, attrs):
-        """
-        Get cover data from the hovered feature's attributes.
-
-        Cover points are memory-layer features carrying the full
-        vw_tww_wastewater_structure row (co_* fields from the main cover),
-        so no extra layer query is needed.
-        """
-        return {
-            "level": _to_float(_pick_attr(attrs, ["co_level", "level"])),
-            "material": _pick_attr(attrs, ["co_material", "material"]),
-            "cover_shape": _pick_attr(attrs, ["co_cover_shape", "co_shape", "cover_shape"]),
-            "brand": _pick_attr(attrs, ["co_brand", "brand"]),
-        }
-
-    def _getManholeEnhancedData(self, obj_id, attrs):
-        """
-        Get enhanced manhole data from vw_tww_wastewater_structure only.
-
-        The id at hand may be either the structure obj_id (layer hover) or the
-        main node obj_id / wn_obj_id (dash hover); the OR-filter handles both.
-        Levels come from co_level / wn_bottom_level with deliberately NO
-        fallback — a missing level is flagged so the tooltip shows
-        "Missing Data" in red, consistent with the red X in the drawing.
-        """
-        result = {}
-        ws_id = _pick_attr(
-            attrs,
-            [
-                "fk_wastewater_structure",
-                "fk_wastewater_structure_obj_id",
-                "ws_obj_id",
-                "fk_wastewater_structure_id",
-                "obj_id",
-            ],
-        )
-        if not ws_id:
-            ws_id = obj_id
-
-        ws_layer = TwwLayerManager.layer("vw_tww_wastewater_structure") or TwwLayerManager.layer(
-            "tww_wastewater_structure"
-        )
-        if ws_layer and ws_id:
-            request = QgsFeatureRequest().setFilterExpression(
-                f'"obj_id" = \'{ws_id}\' OR "wn_obj_id" = \'{ws_id}\''
-            )
-            request.setLimit(1)
-            for ws_feat in ws_layer.getFeatures(request):
-                ws_attrs = _feature_attributes(ws_feat)
-                # _*_label are pre-formatted strings from the DB
-                # (e.g. '\nI1=2200.00\nI2=2200.00'), not numbers — keep them raw.
-                result["cover_label"] = _pick_attr(ws_attrs, ["_cover_label"])
-                result["bottom_label"] = _pick_attr(ws_attrs, ["_bottom_label"])
-                result["input_label"] = _pick_attr(ws_attrs, ["_input_label", "input_label"])
-                result["output_label"] = _pick_attr(ws_attrs, ["_output_label", "output_label"])
-                result["width"] = _to_float(_pick_attr(ws_attrs, ["ma_dimension1"]))
-                result["cover_level"] = _to_float(_pick_attr(ws_attrs, ["co_level"]))
-                result["bottom_level"] = _to_float(_pick_attr(ws_attrs, ["wn_bottom_level"]))
-
-        # Hovered feature may itself carry the structure fields (memory layers
-        # copy the full vw_tww_wastewater_structure row) — same source, no extra query.
-        if result.get("cover_level") is None:
-            result["cover_level"] = _to_float(
-                _pick_attr(attrs, ["co_level", "cover_level", "coverLevel"])
-            )
-        if result.get("bottom_level") is None:
-            result["bottom_level"] = _to_float(
-                _pick_attr(attrs, ["wn_bottom_level", "bottom_level", "bottomLevel"])
-            )
-
-        result["cover_level_missing"] = result.get("cover_level") is None
-        if result.get("bottom_level") == 0:
-            result["bottom_level"] = None
-        result["bottom_level_missing"] = result.get("bottom_level") is None
-
-        return result
+        return str(attrs.get(self.MANHOLE_WS_TYPE) or "").lower() == "manhole"
 
     # ------------------------------------------------------------------
     # Map highlight
@@ -723,8 +630,8 @@ class ProfileHoverManager:
         Highlight the hovered feature on the QGIS main map canvas.
 
         - Reach → highlight on vw_tww_reach by obj_id
-        - Cover → highlight on vm_cover by obj_id
-        - Manhole → highlight associated cover on vm_cover via fk_wastewater_structure
+        - Cover → highlight on vw_cover by co_obj_id
+        - Manhole → highlight associated cover on vw_cover via fk_wastewater_structure
         """
         if self._map_canvas is None:
             return
@@ -734,13 +641,12 @@ class ProfileHoverManager:
         is_reach = self._isReachHover(layer_name, attrs)
         is_cover = self._isCoverHover(layer_name)
         is_manhole = self._isManholeHover(layer_name, attrs)
-        obj_id = _pick_attr(attrs, ["obj_id", "objId", "id"])
-
-        if not obj_id and not is_manhole:
-            self._clearHighlight()
-            return
 
         if is_reach:
+            obj_id = attrs.get(self.REACH_OBJ_ID)
+            if not obj_id:
+                self._clearHighlight()
+                return
             highlight_key = f"reach:{obj_id}"
             if highlight_key == self._current_highlight_key:
                 return
@@ -748,44 +654,29 @@ class ProfileHoverManager:
                 "vw_tww_reach", f'"obj_id" = \'{obj_id}\'', highlight_key
             )
         elif is_cover:
-            # Cover points carry the structure row: fk_main_cover is the actual
-            # cover id; obj_id (the structure id) is kept as a fallback key.
-            cover_id = _pick_attr(attrs, ["fk_main_cover"]) or obj_id
+            cover_id = attrs.get(self.COVER_OBJ_ID)
+            if not cover_id:
+                self._clearHighlight()
+                return
             highlight_key = f"cover:{cover_id}"
             if highlight_key == self._current_highlight_key:
                 return
             self._doHighlightFeature(
-                "vm_cover", f'"obj_id" = \'{cover_id}\'', highlight_key, "vw_cover"
+                "vw_cover", f'"obj_id" = \'{cover_id}\'', highlight_key
             )
         elif is_manhole:
-            ws_id = _pick_attr(
-                attrs, ["fk_wastewater_structure", "fk_wastewater_structure_obj_id", "ws_obj_id"]
-            )
-            if not ws_id and obj_id:
-                # The hovered id is either the structure obj_id (layer hover)
-                # or the main node obj_id (dash hover); resolve it on
-                # vw_tww_wastewater_structure — vw_wastewater_node is not needed.
-                ws_layer = TwwLayerManager.layer("vw_tww_wastewater_structure")
-                if ws_layer:
-                    req = QgsFeatureRequest().setFilterExpression(
-                        f'"obj_id" = \'{obj_id}\' OR "wn_obj_id" = \'{obj_id}\''
-                    )
-                    req.setLimit(1)
-                    for wf in ws_layer.getFeatures(req):
-                        ws_id = _pick_attr(_feature_attributes(wf), ["obj_id"])
-                        break
-            if ws_id:
-                highlight_key = f"manhole:{ws_id}"
-                if highlight_key == self._current_highlight_key:
-                    return
-                self._doHighlightFeature(
-                    "vm_cover",
-                    f'"fk_wastewater_structure" = \'{ws_id}\'',
-                    highlight_key,
-                    "vw_cover",
-                )
-            else:
+            ws_id = attrs.get(self.MANHOLE_OBJ_ID)
+            if not ws_id:
                 self._clearHighlight()
+                return
+            highlight_key = f"manhole:{ws_id}"
+            if highlight_key == self._current_highlight_key:
+                return
+            self._doHighlightFeature(
+                "vw_cover",
+                f'"fk_wastewater_structure" = \'{ws_id}\'',
+                highlight_key,
+            )
         else:
             self._clearHighlight()
 
@@ -922,6 +813,26 @@ class ProfileHoverManager:
         return None
 
     # ------------------------------------------------------------------
+    # Manhole tooltip helpers
+    # ------------------------------------------------------------------
+
+    def _manholeCoverLevelValue(self, attrs):
+        return _to_float(attrs.get(self.MANHOLE_CO_LEVEL))
+
+    def _manholeBottomLevelValue(self, attrs):
+        level = _to_float(attrs.get(self.MANHOLE_BOTTOM_LEVEL))
+        if level == 0:
+            return None
+        return level
+
+    def _appendManholeLabelLine(self, lines, title, label_value):
+        text = self._formatLevelLabel(label_value)
+        if not text:
+            lines.append(f"{title}: {self.MISSING_DATA_HTML}")
+        else:
+            lines.append(f"{title}: {text}")
+
+    # ------------------------------------------------------------------
     # Formatting helpers
     # ------------------------------------------------------------------
 
@@ -976,8 +887,3 @@ class ProfileHoverManager:
             return f"{float(value):.{decimals}f} m"
         except (TypeError, ValueError):
             return str(value)
-
-    def _appendLabeled(self, lines, label, value):
-        if value is None or value == "":
-            return
-        lines.append(f"{label}: {value}")

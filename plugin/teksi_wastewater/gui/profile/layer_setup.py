@@ -295,10 +295,16 @@ class ProfileLayerSetup:
                 {
                     "distance": float(distance_along),
                     "obj_id": entry["obj_id"],
+                    "ws_type": entry.get("ws_type"),
                     "cover_level": entry["cover_level"],
                     "bottom_level": entry["bottom_level"],
                     "cover_level_missing": entry["cover_level_missing"],
                     "bottom_level_missing": entry["bottom_level_missing"],
+                    "dim1_mm": entry["dim1_mm"],
+                    "_cover_label": entry.get("_cover_label"),
+                    "_bottom_label": entry.get("_bottom_label"),
+                    "_input_label": entry.get("_input_label"),
+                    "_output_label": entry.get("_output_label"),
                     "width": manhole_dash_width(dim1_mm, default_px_width),
                 }
             )
@@ -436,8 +442,8 @@ class ProfileLayerSetup:
                 continue
 
             cover_level, bottom_level, cover_missing, bottom_missing = _manhole_level_state(
-                _to_float(_pick_attr(attrs, ["co_level"])),
-                _to_float(_pick_attr(attrs, ["wn_bottom_level"])),
+                _to_float(attrs.get("co_level")),
+                _to_float(attrs.get("wn_bottom_level")),
             )
 
             if bottom_level is not None:
@@ -460,12 +466,17 @@ class ProfileLayerSetup:
                 structure_cache.append(
                     {
                         "geometry": point_geom,
-                        "obj_id": _pick_attr(attrs, ["wn_obj_id"]),
+                        "obj_id": attrs.get("obj_id"),
+                        "ws_type": attrs.get("ws_type"),
                         "cover_level": cover_level,
                         "bottom_level": bottom_level,
                         "cover_level_missing": cover_missing,
                         "bottom_level_missing": bottom_missing,
-                        "dim1_mm": _to_float(_pick_attr(attrs, ["ma_dimension1"])),
+                        "dim1_mm": _to_float(attrs.get("ma_dimension1")),
+                        "_cover_label": attrs.get("_cover_label"),
+                        "_bottom_label": attrs.get("_bottom_label"),
+                        "_input_label": attrs.get("_input_label"),
+                        "_output_label": attrs.get("_output_label"),
                     }
                 )
 
