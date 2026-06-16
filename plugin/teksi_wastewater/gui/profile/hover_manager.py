@@ -53,6 +53,17 @@ class ProfileHoverManager:
     HIGHLIGHT_COLOR = QColor("#2ECC71")  # Emerald green
     HIGHLIGHT_FILL_COLOR = QColor(46, 204, 113, 60)  # Semi-transparent fill
 
+    MISSING_DATA_HTML = '<span style="color:red">Missing Data</span>'
+
+    # Canonical vw_tww_reach attribute names (see tww_app.vw_tww_reach).
+    REACH_OBJ_ID = "obj_id"
+    REACH_MATERIAL = "material"
+    REACH_CLEAR_HEIGHT = "clear_height"
+    REACH_LENGTH_EFFECTIVE = "length_effective"
+    REACH_SLOPE_PER_MILL = "_slope_per_mill"
+    REACH_RP_FROM_LEVEL = "rp_from_level"
+    REACH_RP_TO_LEVEL = "rp_to_level"
+
     def __init__(self, canvas, map_canvas):
         """
         :param canvas: TwwElevationProfileCanvas instance.
@@ -429,7 +440,7 @@ class ProfileHoverManager:
 
     def _formatHoverSummary(self, plot_point, match):
         """Build rich-text tooltip content for a hover match."""
-        attrs, layer_name, feature, _layer = self._attrsFromMatch(match)
+        attrs, layer_name, _feature, _layer = self._attrsFromMatch(match)
 
         lines = []
 
@@ -438,40 +449,46 @@ class ProfileHoverManager:
         is_manhole = self._isManholeHover(layer_name, attrs)
 
         if is_reach:
-            obj_id = _pick_attr(attrs, ["obj_id", "objId", "id", "reach_id"])
+            obj_id = attrs.get(self.REACH_OBJ_ID)
             lines.append(f"Reach {obj_id}" if obj_id else "Reach")
-            material = _pick_attr(
-                attrs,
-                ["material_abbr_en", "material_abbr_de", "material_abbr_fr", "material"],
-            )
-            self._appendLabeled(lines, "Material", material)
-            width_mm = _to_float(_pick_attr(attrs, ["clear_height", "width", "diameter"]))
-            if width_mm is not None:
-                lines.append(f"Width: {width_mm:.0f} mm")
-            length = _to_float(
-                _pick_attr(attrs, ["ch_pipe_length", "length_effective", "length_full", "length"])
-            )
+
+            material = attrs.get(self.REACH_MATERIAL)
+            if material is None or material == "":
+                lines.append(f"Material: {self.MISSING_DATA_HTML}")
+            else:
+                lines.append(f"Material: {material}")
+
+            clear_height_mm = _to_float(attrs.get(self.REACH_CLEAR_HEIGHT))
+            if clear_height_mm is None:
+                lines.append(f"Clear height: {self.MISSING_DATA_HTML}")
+            else:
+                lines.append(f"Clear height: {clear_height_mm:.0f} mm")
+
+            length = _to_float(attrs.get(self.REACH_LENGTH_EFFECTIVE))
             if length is None:
-                length = self._lengthFromFeature(feature)
-            self._appendLabeled(lines, "Length", self._formatMeters(length))
-            gradient = self._deriveGradient(attrs, length)
-            if gradient is not None:
-                lines.append(f"Gradient: {gradient * 1000:.0f} \u2030")
-            entry_level = _to_float(
-                _pick_attr(attrs, ["rp_from_level", "from_level", "start_level", "startLevel"])
-            )
-            exit_level = _to_float(
-                _pick_attr(attrs, ["rp_to_level", "to_level", "end_level", "endLevel"])
-            )
-            if entry_level is None or exit_level is None:
-                start_z, end_z = self._levelsFromFeatureGeometry(feature)
-                if entry_level is None:
-                    entry_level = start_z
-                if exit_level is None:
-                    exit_level = end_z
-            self._appendLabeled(lines, "Entry level", self._formatMeters(entry_level, decimals=1))
-            self._appendLabeled(lines, "Exit level", self._formatMeters(exit_level, decimals=1))
-            if plot_point is not None and entry_level is not None and exit_level is not None:
+                lines.append(f"Length: {self.MISSING_DATA_HTML}")
+            else:
+                lines.append(f"Length: {self._formatMeters(length)}")
+
+            slope_per_mill = _to_float(attrs.get(self.REACH_SLOPE_PER_MILL))
+            if slope_per_mill is None:
+                lines.append(f"Gradient: {self.MISSING_DATA_HTML}")
+            else:
+                lines.append(f"Gradient: {slope_per_mill:.0f} \u2030")
+
+            entry_level = _to_float(attrs.get(self.REACH_RP_FROM_LEVEL))
+            if entry_level is None:
+                lines.append(f"Entry level: {self.MISSING_DATA_HTML}")
+            else:
+                lines.append(f"Entry level: {self._formatMeters(entry_level, decimals=1)}")
+
+            exit_level = _to_float(attrs.get(self.REACH_RP_TO_LEVEL))
+            if exit_level is None:
+                lines.append(f"Exit level: {self.MISSING_DATA_HTML}")
+            else:
+                lines.append(f"Exit level: {self._formatMeters(exit_level, decimals=1)}")
+
+            if plot_point is not None:
                 lines.append(f"Elevation at cursor: {plot_point.y():.2f} m")
 
         elif is_cover:
@@ -588,9 +605,10 @@ class ProfileHoverManager:
             return False
         if "change_point" in layer_name_lower:
             return False
-        has_material = _pick_attr(attrs, ["material"]) is not None
-        has_length = _pick_attr(attrs, ["length_full", "length"]) is not None
-        return has_material and has_length
+        return (
+            attrs.get(self.REACH_MATERIAL) is not None
+            and attrs.get(self.REACH_LENGTH_EFFECTIVE) is not None
+        )
 
     def _isCoverHover(self, layer_name):
         layer_name_lower = (layer_name or "").lower()
@@ -902,73 +920,6 @@ class ProfileHoverManager:
                     except Exception:
                         return None
         return None
-
-    # ------------------------------------------------------------------
-    # Geometry / math helpers
-    # ------------------------------------------------------------------
-
-    def _lengthFromFeature(self, feature):
-        if feature is None or not hasattr(feature, "geometry"):
-            return None
-        try:
-            geometry = feature.geometry()
-            if geometry is None or geometry.isEmpty():
-                return None
-            return float(geometry.length())
-        except Exception:
-            return None
-
-    def _levelsFromFeatureGeometry(self, feature):
-        if feature is None or not hasattr(feature, "geometry"):
-            return (None, None)
-        try:
-            geometry = feature.geometry()
-            if geometry is None or geometry.isEmpty():
-                return (None, None)
-            points = geometry.asPolyline()
-            if not points:
-                multi = geometry.asMultiPolyline()
-                if multi:
-                    first = multi[0]
-                    last = multi[-1]
-                    if first:
-                        points = [first[0]]
-                    if last:
-                        points.append(last[-1])
-            if not points:
-                return (None, None)
-            return (self._pointZ(points[0]), self._pointZ(points[-1]))
-        except Exception:
-            return (None, None)
-
-    def _pointZ(self, point):
-        if point is None:
-            return None
-        if hasattr(point, "z"):
-            try:
-                z_value = point.z() if callable(point.z) else point.z
-                return _to_float(z_value)
-            except Exception:
-                return None
-        return None
-
-    def _deriveGradient(self, attrs, length):
-        gradient = _to_float(_pick_attr(attrs, ["_slope_per_mill", "gradient", "slope"]))
-        if gradient is not None:
-            if abs(gradient) < 1:
-                return gradient
-            return gradient / 1000
-        if length is None or length == 0:
-            return None
-        from_level = _to_float(
-            _pick_attr(attrs, ["rp_from_level", "from_level", "start_level", "startLevel"])
-        )
-        to_level = _to_float(
-            _pick_attr(attrs, ["rp_to_level", "to_level", "end_level", "endLevel"])
-        )
-        if from_level is None or to_level is None:
-            return None
-        return (from_level - to_level) / float(length)
 
     # ------------------------------------------------------------------
     # Formatting helpers
