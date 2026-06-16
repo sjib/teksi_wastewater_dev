@@ -169,9 +169,6 @@ class ProfileLayerSetup:
                 layer = self._temp_cover_layer
             else:
                 layer = TwwLayerManager.layer(layer_name)
-                # Fallback for potential naming differences in DB/views.
-                if not layer and layer_name == "vw_change_points":
-                    layer = TwwLayerManager.layer("vm_change_points")
             if not layer:
                 continue
 
