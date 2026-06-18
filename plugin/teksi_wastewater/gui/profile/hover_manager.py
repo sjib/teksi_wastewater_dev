@@ -493,13 +493,13 @@ class ProfileHoverManager:
             if entry_level is None:
                 lines.append(f"Entry level: {self.MISSING_DATA_HTML}")
             else:
-                lines.append(f"Entry level: {self._formatMeters(entry_level, decimals=1)}")
+                lines.append(f"Entry level: {self._formatMeters(entry_level, decimals=2)}")
 
             exit_level = _to_float(attrs.get(self.REACH_RP_TO_LEVEL))
             if exit_level is None:
                 lines.append(f"Exit level: {self.MISSING_DATA_HTML}")
             else:
-                lines.append(f"Exit level: {self._formatMeters(exit_level, decimals=1)}")
+                lines.append(f"Exit level: {self._formatMeters(exit_level, decimals=2)}")
 
             if plot_point is not None:
                 lines.append(f"Elevation at cursor: {plot_point.y():.2f} m")
