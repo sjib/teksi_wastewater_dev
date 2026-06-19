@@ -24,7 +24,7 @@
 
 from qgis.core import QgsProfilePoint
 from qgis.PyQt.QtCore import QPointF, QRectF, Qt
-from qgis.PyQt.QtGui import QColor, QPainter, QPen
+from qgis.PyQt.QtGui import QColor, QFont, QPainter, QPen
 from qgis.gui import QgsElevationProfileCanvas, QgsPlotCanvasItem
 
 from .layer_setup import MANHOLE_DEFAULT_PX_WIDTH, _resolve_manhole_anchors
@@ -102,6 +102,8 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         cover_pen.setStyle(Qt.PenStyle.SolidLine)
         cover_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
 
+        any_missing = False
+
         for dash in self._dashes:
             distance = dash.get("distance")
             cover_level = dash.get("cover_level")
@@ -140,18 +142,23 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                 self._drawCoverLine(painter, cover_pt, half_width, cover_pen)
             elif bottom_missing:
                 self._drawCoverLine(painter, cover_pt, half_width, cover_pen)
-                self._drawMissingDataX(
-                    painter, QPointF(cover_pt.x(), cover_pt.y() + 18.0)
-                )
+                x_center = QPointF(cover_pt.x(), cover_pt.y() + 18.0)
+                self._drawMissingDataX(painter, x_center)
+                self._drawMissingLabel(painter, x_center, "no bottom level")
+                any_missing = True
             else:
                 painter.setPen(shaft_pen)
                 painter.drawLine(
                     QPointF(bottom_pt.x() - half_width, bottom_pt.y()),
                     QPointF(bottom_pt.x() + half_width, bottom_pt.y()),
                 )
-                self._drawMissingDataX(
-                    painter, QPointF(bottom_pt.x(), bottom_pt.y() - 18.0)
-                )
+                x_center = QPointF(bottom_pt.x(), bottom_pt.y() - 18.0)
+                self._drawMissingDataX(painter, x_center)
+                self._drawMissingLabel(painter, x_center, "no cover level")
+                any_missing = True
+
+        if any_missing:
+            self._drawMissingLegend(painter, plot_area)
 
     def _drawMissingDataX(self, painter, center, x_size=8.0):
         x_pen = QPen(QColor("#FF0000"), 2.5)
@@ -165,6 +172,32 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             QPointF(center.x() + x_size, center.y() - x_size),
             QPointF(center.x() - x_size, center.y() + x_size),
         )
+
+    def _missingDataFont(self):
+        font = QFont(self._canvas.font())
+        font.setPointSize(8)
+        return font
+
+    def _drawMissingLabel(self, painter, x_center, text):
+        """Small red caption placed to the right of a missing-data X mark."""
+        painter.setFont(self._missingDataFont())
+        painter.setPen(QPen(QColor("#FF0000")))
+        painter.drawText(QPointF(x_center.x() + 12.0, x_center.y() + 4.0), text)
+
+    def _drawMissingLegend(self, painter, plot_area):
+        """Top-left legend explaining the red X mark; only drawn when data is missing."""
+        if plot_area is not None and not plot_area.isEmpty():
+            x0 = plot_area.left() + 10.0
+            y0 = plot_area.top() + 14.0
+        else:
+            top_left = self._rect.topLeft()
+            x0 = top_left.x() + 12.0
+            y0 = top_left.y() + 16.0
+
+        self._drawMissingDataX(painter, QPointF(x0 + 6.0, y0), x_size=5.0)
+        painter.setFont(self._missingDataFont())
+        painter.setPen(QPen(QColor("#FF0000")))
+        painter.drawText(QPointF(x0 + 18.0, y0 + 4.0), "= missing data")
 
 
 class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
