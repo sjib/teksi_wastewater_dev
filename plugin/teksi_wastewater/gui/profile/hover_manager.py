@@ -257,10 +257,20 @@ class ProfileHoverManager:
             cover_level = dash.get("cover_level")
             bottom_level = dash.get("bottom_level")
 
-            if dash_distance is None or (cover_level is None and bottom_level is None):
+            if dash_distance is None:
                 continue
 
-            eff_cover, eff_bottom = _resolve_manhole_anchors(cover_level, bottom_level)
+            # Both levels missing: the dashed "?" shaft is anchored to the
+            # adjacent reach invert, so hit-test a band around that anchor.
+            if dash.get("cover_level_missing") and dash.get("bottom_level_missing"):
+                anchor_level = dash.get("anchor_level")
+                if anchor_level is None:
+                    continue
+                eff_cover = eff_bottom = anchor_level
+            elif cover_level is None and bottom_level is None:
+                continue
+            else:
+                eff_cover, eff_bottom = _resolve_manhole_anchors(cover_level, bottom_level)
 
             dist_diff = abs(distance - dash_distance)
             if dist_diff > tolerance_dist:

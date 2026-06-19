@@ -22,6 +22,8 @@
 #
 # ---------------------------------------------------------------------
 
+import math
+
 from qgis.core import (
     Qgis,
     QgsFeature,
@@ -346,6 +348,15 @@ class ProfileLayerSetup:
                 pass
 
             dim1_mm = entry["dim1_mm"]
+            cover_missing = entry["cover_level_missing"]
+            bottom_missing = entry["bottom_level_missing"]
+            # No level at all → anchor the dashed "?" shaft to the adjacent reach
+            # invert instead of fabricating a Z. None when no Z reach is nearby.
+            anchor_level = (
+                self._adjacentReachLevel(geometry)
+                if cover_missing and bottom_missing
+                else None
+            )
             dashes.append(
                 {
                     "distance": float(distance_along),
@@ -353,8 +364,9 @@ class ProfileLayerSetup:
                     "ws_type": entry.get("ws_type"),
                     "cover_level": entry["cover_level"],
                     "bottom_level": entry["bottom_level"],
-                    "cover_level_missing": entry["cover_level_missing"],
-                    "bottom_level_missing": entry["bottom_level_missing"],
+                    "cover_level_missing": cover_missing,
+                    "bottom_level_missing": bottom_missing,
+                    "anchor_level": anchor_level,
                     "dim1_mm": entry["dim1_mm"],
                     "_cover_label": entry.get("_cover_label"),
                     "_bottom_label": entry.get("_bottom_label"),
@@ -365,6 +377,46 @@ class ProfileLayerSetup:
             )
 
         return dashes
+
+    def _adjacentReachLevel(self, point_geom):
+        """
+        Invert level to anchor a manhole that has no cover and no bottom level.
+
+        Both levels are missing, so the shaft has no true Z of its own. Rather
+        than fabricate one, anchor it to the connected reach invert — the Z of
+        the nearest vertex on the temp reach layer (reach endpoints sit on the
+        manhole node). Returns None when no Z-bearing reach is nearby, in which
+        case the canvas simply skips drawing instead of guessing a position.
+        """
+        if self._temp_reach_layer is None or point_geom is None:
+            return None
+        try:
+            point = point_geom.asPoint()
+        except Exception:
+            return None
+
+        best_z = None
+        best_sqr = None
+        for feat in self._temp_reach_layer.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            try:
+                sqr_dist, vertex_index = geom.closestVertexWithContext(point)
+            except Exception:
+                continue
+            if vertex_index < 0:
+                continue
+            if best_sqr is not None and sqr_dist >= best_sqr:
+                continue
+            vertex = geom.vertexAt(vertex_index)
+            z_value = vertex.z()
+            if z_value is None or math.isnan(z_value):
+                continue
+            best_sqr = sqr_dist
+            best_z = z_value
+
+        return best_z
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -565,23 +617,26 @@ class ProfileLayerSetup:
                 cover_feat.setAttributes(feat.attributes())
                 cover_features.append(cover_feat)
 
-            if not (cover_missing and bottom_missing):
-                structure_cache.append(
-                    {
-                        "geometry": point_geom,
-                        "obj_id": attrs.get("obj_id"),
-                        "ws_type": attrs.get("ws_type"),
-                        "cover_level": cover_level,
-                        "bottom_level": bottom_level,
-                        "cover_level_missing": cover_missing,
-                        "bottom_level_missing": bottom_missing,
-                        "dim1_mm": _to_float(attrs.get("ma_dimension1")),
-                        "_cover_label": attrs.get("_cover_label"),
-                        "_bottom_label": attrs.get("_bottom_label"),
-                        "_input_label": attrs.get("_input_label"),
-                        "_output_label": attrs.get("_output_label"),
-                    }
-                )
+            # Both-missing structures used to be dropped here. They are now kept
+            # so the canvas can draw an explicit "no level data" dashed shaft;
+            # no node/cover feature is added (both guards above failed), so
+            # nothing is fabricated for the rendered reach/point layers.
+            structure_cache.append(
+                {
+                    "geometry": point_geom,
+                    "obj_id": attrs.get("obj_id"),
+                    "ws_type": attrs.get("ws_type"),
+                    "cover_level": cover_level,
+                    "bottom_level": bottom_level,
+                    "cover_level_missing": cover_missing,
+                    "bottom_level_missing": bottom_missing,
+                    "dim1_mm": _to_float(attrs.get("ma_dimension1")),
+                    "_cover_label": attrs.get("_cover_label"),
+                    "_bottom_label": attrs.get("_bottom_label"),
+                    "_input_label": attrs.get("_input_label"),
+                    "_output_label": attrs.get("_output_label"),
+                }
+            )
 
         return node_features, cover_features, structure_cache
 
