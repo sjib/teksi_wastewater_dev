@@ -613,10 +613,16 @@ class TeksiWastewaterPlugin:
         # Get geometry directly from profile_tool's pathPolyline
         # This is already in the correct order (built in appendProfile)
         path_polyline = getattr(self.profile_tool, "pathPolyline", None)
+        # Selected-path features so the profile renders only this path, not the
+        # side branches that merely share a node with it.
+        reach_ids = getattr(self.profile_tool, "profile_reach_ids", None)
+        node_points = getattr(self.profile_tool, "profile_node_points", None)
         if path_polyline:
             profile_geometry = QgsGeometry.fromPolylineXY(path_polyline)
             if profile_geometry and not profile_geometry.isEmpty():
-                self.plotWidget.setProfileCurve(profile_geometry)
+                self.plotWidget.setProfileCurve(
+                    profile_geometry, reach_ids=reach_ids, node_points=node_points
+                )
             else:
                 self.logger.warning("onProfileChanged: Geometry is empty or invalid")
         else:

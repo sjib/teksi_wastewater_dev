@@ -277,6 +277,11 @@ class TwwProfileMapTool(TwwMapTool):
 
         self.profile.setRubberband(self.rbHighlight)
 
+        # obj_ids / node points of the currently selected path, used to restrict
+        # the elevation profile to the path (and keep side branches out).
+        self.profile_reach_ids = set()
+        self.profile_node_points = []
+
         self.saveTool = None
 
     def setActive(self):
@@ -296,6 +301,8 @@ class TwwProfileMapTool(TwwMapTool):
         self.rbHelperLine.reset()
         self.selectedPathPoints = []
         self.pathPolyline = []
+        self.profile_reach_ids = set()
+        self.profile_node_points = []
 
     def findPath(self, start_point, end_point):
         """
@@ -362,6 +369,18 @@ class TwwProfileMapTool(TwwMapTool):
         if len(vertices) > 1:
             self.rubberBand.reset()
 
+            # Record the path's reaches and node points so the elevation profile
+            # can render only the selected path (not every nearby branch).
+            for _p1, _p2, edge in edges:
+                if edge.get("objType") == "reach":
+                    base_feature = edge.get("baseFeature")
+                    if base_feature:
+                        self.profile_reach_ids.add(base_feature)
+            for v in vertices:
+                node_point = self._nodePoint(node_features, v)
+                if node_point is not None:
+                    self.profile_node_points.append(node_point)
+
             elem = TwwProfileNodeElement(vertices[0], node_features, self.segmentOffset)
             self.profile.addElement(vertices[0], elem)
 
@@ -420,25 +439,115 @@ class TwwProfileMapTool(TwwMapTool):
 
                 self.segmentOffset = to_offset
 
-            # Create rubberband geometry
-            # Reset pathPolyline for this segment (but keep previous segments if this is a continuation)
-            segment_polyline = []
-            for feat_id in edge_ids:
-                segment_polyline.extend(edge_features[feat_id].geometry().asPolyline())
-            
-            # Add this segment to the overall path
-            self.pathPolyline.extend(segment_polyline)
+            # Create rubberband geometry.
+            # Build the path polyline from the ACTUAL reach geometries
+            # (vw_tww_reach), not the routing-network segments. The routing
+            # geometry (vw_network_segment) can detour out to intermediate node
+            # centres, adding small out-and-back spikes to the curve; QGIS then
+            # fails to project the smooth reach across a spike and leaves a
+            # visual gap in the pipe. Using the real reach geometry keeps the
+            # curve identical to the drawn pipes. Each reach is oriented to the
+            # traversal direction and its shared junction vertex de-duplicated.
+            segment_reach_ids = {
+                edge.get("baseFeature")
+                for _p1, _p2, edge in edges
+                if edge.get("objType") == "reach"
+            }
+            reach_geoms = self._fetchReachPolylines(segment_reach_ids)
+
+            appended_reach = None
+            for p1, p2, edge in edges:
+                base_feature = edge.get("baseFeature")
+                if edge.get("objType") == "reach" and base_feature in reach_geoms:
+                    # A reach can span several routing segments; append it once.
+                    if base_feature == appended_reach:
+                        continue
+                    reach_polyline = list(reach_geoms[base_feature])
+                    appended_reach = base_feature
+                else:
+                    # Special structures (and any reach without a vw_tww_reach
+                    # geometry) fall back to the routing-segment geometry.
+                    reach_polyline = edge_features[edge["feature"]].geometry().asPolyline()
+
+                if not reach_polyline:
+                    continue
+
+                from_pt = self._nodePoint(node_features, p1)
+                if from_pt is not None and reach_polyline[-1].sqrDist(
+                    from_pt
+                ) < reach_polyline[0].sqrDist(from_pt):
+                    reach_polyline.reverse()
+
+                if self.pathPolyline and self.pathPolyline[-1].sqrDist(reach_polyline[0]) < 1e-6:
+                    reach_polyline = reach_polyline[1:]
+
+                self.pathPolyline.extend(reach_polyline)
 
             self.rubberBand.addGeometry(QgsGeometry.fromPolylineXY(self.pathPolyline), node_layer)
-            
-            # Debug output
+
             self.logger.debug(f"appendProfile: pathPolyline now has {len(self.pathPolyline)} points")
-            self.logger.debug(f"appendProfile: Emitting profileChanged signal with {len(self.profile.getElements())} elements")
-            
+
             self.profileChanged.emit(self.profile)
             return True
         else:
             return False
+
+    @staticmethod
+    def _fetchReachPolylines(reach_ids):
+        """
+        Fetch {obj_id: [QgsPointXY, ...]} for the given reaches from
+        vw_tww_reach. The profile curve is built from these real pipe
+        geometries so it matches the rendered reaches exactly (the routing
+        network geometry can detour through node centres and differ slightly).
+        """
+        polylines = {}
+        ids = [rid for rid in reach_ids if rid]
+        if not ids:
+            return polylines
+
+        reach_layer = TwwLayerManager.layer("vw_tww_reach")
+        if reach_layer is None:
+            return polylines
+
+        quoted = ",".join("'" + str(rid).replace("'", "''") + "'" for rid in ids)
+        request = QgsFeatureRequest()
+        request.setFilterExpression(f"obj_id IN ({quoted})")
+        for feat in reach_layer.getFeatures(request):
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            # Use vertices() rather than asPolyline(): curved reaches are stored
+            # as CircularString / CompoundCurve, for which asPolyline() returns
+            # an empty list (which previously dropped them back to the spiky
+            # routing geometry). vertices() also returns the SAME control points
+            # the rendered reach layer uses (see _reachZFeatures), so the curve
+            # stays identical to the drawn pipe.
+            verts = list(geom.vertices())
+            if len(verts) < 2:
+                continue
+            try:
+                polylines[feat["obj_id"]] = [QgsPointXY(v.x(), v.y()) for v in verts]
+            except KeyError:
+                continue
+        return polylines
+
+    @staticmethod
+    def _nodePoint(node_cache, node_id):
+        """
+        Return the QgsPointXY of a graph node, or None if unavailable.
+
+        Used to orient reach geometries to the path traversal direction.
+        """
+        try:
+            geometry = node_cache.featureById(node_id).geometry()
+        except (KeyError, AttributeError):
+            return None
+        if geometry is None or geometry.isEmpty():
+            return None
+        try:
+            return geometry.asPoint()
+        except (ValueError, AttributeError):
+            return None
 
     def canvasMoveEvent(self, event):
         """
@@ -474,6 +583,8 @@ class TwwProfileMapTool(TwwMapTool):
         # Rebuild profile from remaining history
         self.profile.reset()
         self.pathPolyline = []
+        self.profile_reach_ids = set()
+        self.profile_node_points = []
         self.segmentOffset = 0
         self.rubberBand.reset()
 
@@ -509,6 +620,8 @@ class TwwProfileMapTool(TwwMapTool):
         else:
             # No ongoing selection, clear everything (second right-click)
             self.pathPolyline = []
+            self.profile_reach_ids = set()
+            self.profile_node_points = []
             self.rubberBand.reset()  # Clear the path visualization
             self.rbHelperLine.reset()
             self.profile.reset()
@@ -534,6 +647,8 @@ class TwwProfileMapTool(TwwMapTool):
             else:
                 # Starting a new path - clear old accumulated data
                 self.pathPolyline = []
+                self.profile_reach_ids = set()
+                self.profile_node_points = []
                 self.rubberBand.reset()
                 self.profile.reset()
                 self.segmentOffset = 0

@@ -129,11 +129,16 @@ class TwwElevationProfileWidget(QWidget):
         """Clear hover tooltip and map highlight (e.g. when dock closes)."""
         self._hover_manager.clearState()
 
-    def setProfileCurve(self, geometry):
+    def setProfileCurve(self, geometry, reach_ids=None, node_points=None):
         """
         Set the profile curve (path) for the elevation profile.
 
         :param geometry: QgsGeometry object representing the path.
+        :param reach_ids: optional iterable of selected reach obj_ids. When
+            given, only these reaches are rendered (keeps side branches that
+            share a node with the path out of the profile).
+        :param node_points: optional iterable of QgsPointXY of the selected
+            path's nodes, used to filter structures the same way.
         """
         if not isinstance(geometry, QgsGeometry) or geometry.isEmpty():
             return
@@ -159,6 +164,10 @@ class TwwElevationProfileWidget(QWidget):
             self._data_sources_setup = True
         else:
             self._layer_setup.applyCanvasTolerance(self._manhole_dash_tolerance)
+
+        # Restrict the rendered features to the selected path (no-op when the
+        # caller passes no selection, e.g. the tree tool).
+        self._layer_setup.updatePathFeatures(reach_ids=reach_ids, node_points=node_points)
 
         self._cancelCanvasJobs()
         if hasattr(self.canvas, "invalidateCurrentPlotExtent"):

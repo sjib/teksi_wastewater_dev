@@ -63,6 +63,8 @@ class ProfileLayerSetup:
         self._temp_node_layer = None  # Node points: XY from ws geometry, Z = wn_bottom_level
         self._temp_cover_layer = None  # Cover points: XY from ws geometry, Z = co_level
         self._structure_cache = []  # Cached ws features for manhole dash building
+        self._reach_source = None  # Original vw_tww_reach layer (for re-filtering)
+        self._ws_source = None  # Original vw_tww_wastewater_structure layer
 
     # ------------------------------------------------------------------
     # Public API
@@ -91,8 +93,10 @@ class ProfileLayerSetup:
         self._canvas.setProject(project)
 
         # Build node/cover point layers from the structure view (single pass).
-        ws_source = TwwLayerManager.layer("vw_tww_wastewater_structure")
-        self._temp_node_layer, self._temp_cover_layer = self._buildStructurePointLayers(ws_source)
+        self._ws_source = TwwLayerManager.layer("vw_tww_wastewater_structure")
+        self._temp_node_layer, self._temp_cover_layer = self._buildStructurePointLayers(
+            self._ws_source
+        )
 
         # 2. Define the layers to use (based on working configuration)
         # profile_type: 'surface' = Continuous Surface, 'features' = Individual Features
@@ -175,6 +179,7 @@ class ProfileLayerSetup:
             # Special handling for vw_tww_reach: create temp layer with Z values
             # because the original geometry doesn't have proper Z values
             if layer_name == "vw_tww_reach":
+                self._reach_source = layer
                 self._temp_reach_layer = self._createReachLayerWithZ(layer)
                 if self._temp_reach_layer:
                     layer = self._temp_reach_layer
@@ -257,6 +262,55 @@ class ProfileLayerSetup:
             except Exception:
                 pass
 
+    def updatePathFeatures(self, reach_ids=None, node_points=None):
+        """
+        Re-filter the temp layer contents to the currently selected path.
+
+        Reuses the existing layer objects so the canvas is NOT re-wired with
+        setLayers() (that crashes an active QgsElevationProfileCanvas). Only the
+        features are swapped, which the canvas picks up on the next refresh.
+
+        Without this, QGIS draws every reach/structure within tolerance of the
+        profile curve — including side branches that merely share a node with
+        the path. When reach_ids / node_points are None the layers keep every
+        feature (used by the tree tool and as a safe fallback).
+
+        :param reach_ids: iterable of selected reach obj_ids, or None.
+        :param node_points: iterable of QgsPointXY of selected path nodes, or None.
+        """
+        if self._temp_reach_layer is not None and self._reach_source is not None:
+            self._refillLayer(
+                self._temp_reach_layer,
+                self._reachZFeatures(self._reach_source, reach_ids),
+            )
+
+        if (
+            self._ws_source is not None
+            and self._temp_node_layer is not None
+            and self._temp_cover_layer is not None
+        ):
+            node_features, cover_features, structure_cache = self._structureFeatureSets(
+                self._ws_source, node_points
+            )
+            self._refillLayer(self._temp_node_layer, node_features)
+            self._refillLayer(self._temp_cover_layer, cover_features)
+            self._structure_cache = structure_cache
+
+    @staticmethod
+    def _refillLayer(layer, features):
+        """Replace all features of a memory layer in place."""
+        provider = layer.dataProvider()
+        try:
+            provider.truncate()
+        except Exception:
+            existing = [f.id() for f in layer.getFeatures()]
+            if existing:
+                provider.deleteFeatures(existing)
+        if features:
+            provider.addFeatures(features)
+        layer.updateExtents()
+        layer.triggerRepaint()
+
     def buildManholeDashes(self, profile_curve_geom, tolerance, default_px_width=None):
         """
         Build manhole shaft overlay data along a profile curve.
@@ -315,7 +369,7 @@ class ProfileLayerSetup:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _createReachLayerWithZ(self, original_layer):
+    def _createReachLayerWithZ(self, original_layer, reach_ids=None):
         """
         Create a temporary memory layer from vw_tww_reach with proper Z values.
 
@@ -323,6 +377,7 @@ class ProfileLayerSetup:
         and rp_to_level attributes and set them as the Z coordinates.
 
         :param original_layer: The original vw_tww_reach layer
+        :param reach_ids: optional iterable of reach obj_ids to keep (path filter)
         :return: Memory layer with LineStringZ geometry containing proper Z values
         """
         if original_layer is None:
@@ -340,9 +395,30 @@ class ProfileLayerSetup:
         provider.addAttributes(original_layer.fields().toList())
         mem_layer.updateFields()
 
+        provider.addFeatures(self._reachZFeatures(original_layer, reach_ids))
+        mem_layer.updateExtents()
+        return mem_layer
+
+    def _reachZFeatures(self, original_layer, reach_ids=None):
+        """
+        Build LineStringZ features from vw_tww_reach, interpolating Z from
+        rp_from_level / rp_to_level. Reaches missing either level are dropped.
+
+        :param reach_ids: when not None, only reaches whose obj_id is in this
+            set are included — this restricts the profile to the selected path
+            instead of every reach that happens to lie near the curve.
+        """
+        id_filter = set(reach_ids) if reach_ids is not None else None
         features = []
 
         for feat in original_layer.getFeatures():
+            if id_filter is not None:
+                try:
+                    if feat["obj_id"] not in id_filter:
+                        continue
+                except KeyError:
+                    continue
+
             from_level = None
             to_level = None
 
@@ -400,14 +476,15 @@ class ProfileLayerSetup:
             new_feat.setAttributes(feat.attributes())
             features.append(new_feat)
 
-        provider.addFeatures(features)
-        mem_layer.updateExtents()
-        return mem_layer
+        return features
 
-    def _buildStructurePointLayers(self, ws_layer):
+    def _buildStructurePointLayers(self, ws_layer, node_points=None):
         """
         Build node and cover PointZ memory layers in one pass over
         vw_tww_wastewater_structure, caching entries for manhole dashes.
+
+        :param node_points: optional iterable of QgsPointXY of selected path
+            nodes; when given only structures sitting on a path node are kept.
         """
         if ws_layer is None:
             self._structure_cache = []
@@ -426,6 +503,28 @@ class ProfileLayerSetup:
             provider.addAttributes(ws_layer.fields().toList())
             mem_layer.updateFields()
 
+        node_features, cover_features, structure_cache = self._structureFeatureSets(
+            ws_layer, node_points
+        )
+
+        node_layer.dataProvider().addFeatures(node_features)
+        cover_layer.dataProvider().addFeatures(cover_features)
+        node_layer.updateExtents()
+        cover_layer.updateExtents()
+        self._structure_cache = structure_cache
+        return node_layer, cover_layer
+
+    def _structureFeatureSets(self, ws_layer, node_points=None):
+        """
+        Scan vw_tww_wastewater_structure once and return
+        (node_features, cover_features, structure_cache).
+
+        When node_points is not None, a structure is only included if its
+        profile point coincides with one of the selected path's node points —
+        this keeps side-branch structures out of the profile.
+        """
+        path_points = list(node_points) if node_points is not None else None
+
         node_features = []
         cover_features = []
         structure_cache = []
@@ -439,6 +538,9 @@ class ProfileLayerSetup:
             try:
                 point = point_geom.asPoint()
             except Exception:
+                continue
+
+            if path_points is not None and not _point_on_path(point, path_points):
                 continue
 
             cover_level, bottom_level, cover_missing, bottom_missing = _manhole_level_state(
@@ -480,12 +582,7 @@ class ProfileLayerSetup:
                     }
                 )
 
-        node_layer.dataProvider().addFeatures(node_features)
-        cover_layer.dataProvider().addFeatures(cover_features)
-        node_layer.updateExtents()
-        cover_layer.updateExtents()
-        self._structure_cache = structure_cache
-        return node_layer, cover_layer
+        return node_features, cover_features, structure_cache
 
     def _configureLayerSymbols(self, elevation_props, style, layer_name):
         """
@@ -606,6 +703,24 @@ def _pick_attr(attrs, keys):
         if key.lower() in lower_map:
             return lower_map[key.lower()]
     return None
+
+
+def _point_on_path(point, path_points, max_sqr_dist=0.01):
+    """
+    True if ``point`` coincides with one of the selected path's node points.
+
+    A structure's profile point is the main wastewater-node position, which is
+    exactly the same coordinate as the corresponding path node, so an exact
+    match (within a 0.1 m tolerance) reliably keeps path structures and rejects
+    branch structures sitting elsewhere.
+    """
+    for path_point in path_points:
+        try:
+            if point.sqrDist(path_point) <= max_sqr_dist:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _to_float(value):
