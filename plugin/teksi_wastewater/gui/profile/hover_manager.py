@@ -33,6 +33,7 @@ from .layer_setup import (
     _feature_attributes,
     _resolve_manhole_anchors,
     _to_float,
+    resolve_value_list,
 )
 
 
@@ -52,6 +53,11 @@ class ProfileHoverManager:
     HIGHLIGHT_FILL_COLOR = QColor(46, 204, 113, 60)  # Semi-transparent fill
 
     MISSING_DATA_HTML = '<span style="color:red">Missing Data</span>'
+
+    # tww_vl dictionary tables for resolving raw integer value-list codes.
+    REACH_MATERIAL_VL = "reach_material"
+    COVER_MATERIAL_VL = "cover_material"
+    COVER_SHAPE_VL = "cover_cover_shape"
 
     # Canonical vw_tww_reach attribute names (see tww_app.vw_tww_reach).
     REACH_OBJ_ID = "obj_id"
@@ -469,7 +475,8 @@ class ProfileHoverManager:
             if material is None or material == "":
                 lines.append(f"Material: {self.MISSING_DATA_HTML}")
             else:
-                lines.append(f"Material: {material}")
+                material_text = resolve_value_list(self.REACH_MATERIAL_VL, material)
+                lines.append(f"Material: {material_text or material}")
 
             clear_height_mm = _to_float(attrs.get(self.REACH_CLEAR_HEIGHT))
             if clear_height_mm is None:
@@ -518,13 +525,15 @@ class ProfileHoverManager:
             if material is None or material == "":
                 lines.append(f"Material: {self.MISSING_DATA_HTML}")
             else:
-                lines.append(f"Material: {material}")
+                material_text = resolve_value_list(self.COVER_MATERIAL_VL, material)
+                lines.append(f"Material: {material_text or material}")
 
             cover_shape = attrs.get(self.COVER_SHAPE)
             if cover_shape is None or cover_shape == "":
                 lines.append(f"Cover shape: {self.MISSING_DATA_HTML}")
             else:
-                lines.append(f"Cover shape: {cover_shape}")
+                shape_text = resolve_value_list(self.COVER_SHAPE_VL, cover_shape)
+                lines.append(f"Cover shape: {shape_text or cover_shape}")
 
             brand = attrs.get(self.COVER_BRAND)
             if brand is None or brand == "":

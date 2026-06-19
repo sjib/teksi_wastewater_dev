@@ -40,6 +40,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
+from ...utils.database_utils import DatabaseUtils
 from ...utils.twwlayermanager import TwwLayerManager
 
 MANHOLE_DEFAULT_PX_WIDTH = 10
@@ -773,3 +774,83 @@ def manhole_dash_width(dim1_mm, default_px=MANHOLE_DEFAULT_PX_WIDTH):
     if dim1_mm is None:
         return default_px
     return max(6.0, min(16.0, float(dim1_mm) / 100.0))
+
+
+# ------------------------------------------------------------------
+# Value-list (code -> localized term) resolution
+# ------------------------------------------------------------------
+#
+# The TEKSI views expose value-list fields (material, cover shape, ...) as raw
+# integer codes — e.g. vw_tww_reach.material = 3639. The tooltips must show the
+# human-readable term ("concrete_insitu"), so codes are resolved against the
+# tww_vl.<table> dictionaries. Each table is tiny and loaded once, then cached
+# for the session; resolution failures fall back to the raw code (never worse
+# than before) so a missing DB connection cannot break the tooltip.
+
+_VALUE_LIST_LANGS = ("en", "de", "fr", "it", "ro")
+_value_list_cache = {}  # table name -> {code: term}
+
+
+def _value_list_language():
+    """Return the 2-letter language the TEKSI value lists should be shown in."""
+    name = ""
+    try:
+        from qgis.PyQt.QtCore import QLocale, QSettings
+
+        settings = QSettings()
+        if settings.value("locale/overrideFlag", False, type=bool):
+            name = settings.value("locale/userLocale", "") or ""
+        else:
+            name = QLocale.system().name()
+    except Exception:
+        name = ""
+    lang = str(name)[:2].lower()
+    return lang if lang in _VALUE_LIST_LANGS else "en"
+
+
+def _load_value_list(table):
+    """Load and cache a ``tww_vl.<table>`` code -> localized term mapping."""
+    if table in _value_list_cache:
+        return _value_list_cache[table]
+
+    lang = _value_list_language()
+    try:
+        # value_<lang> with English/German fallbacks for incomplete dictionaries.
+        # ``table`` is always a hard-coded constant from the callers below.
+        rows = DatabaseUtils.fetchall(
+            f"SELECT code, COALESCE(value_{lang}, value_en, value_de) "
+            f"FROM tww_vl.{table}"
+        )
+    except Exception:
+        # DB not reachable yet — return without caching so a later hover retries.
+        return {}
+
+    mapping = {}
+    for code, term in rows or []:
+        if code is None or term is None:
+            continue
+        try:
+            mapping[int(code)] = str(term)
+        except (TypeError, ValueError):
+            continue
+
+    _value_list_cache[table] = mapping
+    return mapping
+
+
+def resolve_value_list(table, code):
+    """
+    Resolve an integer value-list code to its localized term.
+
+    :param table: the ``tww_vl`` dictionary table name (e.g. ``"reach_material"``).
+    :param code: the raw code from the view (int, numeric string, or None).
+    :return: the term, or None when the code is empty or cannot be resolved
+        (DB unavailable / code absent) — callers then fall back to the raw code.
+    """
+    if code is None or code == "":
+        return None
+    try:
+        code_int = int(code)
+    except (TypeError, ValueError):
+        return None
+    return _load_value_list(table).get(code_int)
