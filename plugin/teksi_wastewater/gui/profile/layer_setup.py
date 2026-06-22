@@ -912,14 +912,17 @@ def reach_band_px(clear_height_mm):
     """
     Schematic pipe-band thickness in px from clear_height (mm).
 
-    Real clear heights (0.08-2 m) are sub-pixel on the elevation axis once a
-    whole network's relief is in view, so thickness is an *exaggerated,
-    proportional* glyph (bigger pipe -> thicker band), not the true height in
-    metres. Missing clear_height returns None -> only the invert line is drawn.
+    Uses the SAME vertical exaggeration as the manhole (MANHOLE_VERTICAL_GAIN_PX),
+    so a pipe is always drawn smaller than the manhole it connects to — a pipe's
+    clear height is physically less than the manhole's depth, so a band taller
+    than its manhole (the old clear_height/40 ≈ 25 px/m, ~4× the manhole scale)
+    read wrong. A small minimum keeps thin pipes visible. Missing clear_height
+    returns None → only the invert line is drawn.
     """
     if clear_height_mm is None:
         return None
-    return max(6.0, min(50.0, float(clear_height_mm) / 40.0))
+    px = (float(clear_height_mm) / 1000.0) * MANHOLE_VERTICAL_GAIN_PX
+    return max(4.0, min(MANHOLE_MAX_SHAFT_PX, px))
 
 
 def manhole_shaft_px(depth_m):
