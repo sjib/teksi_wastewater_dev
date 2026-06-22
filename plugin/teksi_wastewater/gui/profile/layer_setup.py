@@ -373,6 +373,7 @@ class ProfileLayerSetup:
                     "co_material": entry.get("co_material"),
                     "co_shape": entry.get("co_shape"),
                     "co_brand": entry.get("co_brand"),
+                    "ss_function": entry.get("ss_function"),
                     "width": manhole_dash_width(dim1_mm, default_px_width),
                 }
             )
@@ -704,6 +705,8 @@ class ProfileLayerSetup:
                     "co_material": attrs.get("co_material"),
                     "co_shape": attrs.get("co_shape"),
                     "co_brand": attrs.get("co_brand"),
+                    # Special-structure function (value-list code) for the tooltip.
+                    "ss_function": attrs.get("ss_function"),
                 }
             )
 

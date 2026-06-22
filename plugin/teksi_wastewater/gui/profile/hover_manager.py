@@ -60,6 +60,7 @@ class ProfileHoverManager:
     REACH_MATERIAL_VL = "reach_material"
     COVER_MATERIAL_VL = "cover_material"
     COVER_SHAPE_VL = "cover_cover_shape"
+    SPECIAL_STRUCTURE_FUNCTION_VL = "special_structure_function"
 
     # Canonical vw_tww_reach attribute names (see tww_app.vw_tww_reach).
     REACH_OBJ_ID = "obj_id"
@@ -376,6 +377,7 @@ class ProfileHoverManager:
                     "_input_label": dash.get("_input_label"),
                     "_output_label": dash.get("_output_label"),
                     "ma_dimension1": dash.get("dim1_mm"),
+                    "ss_function": dash.get("ss_function"),
                     "_is_manhole_dash": True,
                 },
                 "distance": dash_distance,
@@ -769,6 +771,12 @@ class ProfileHoverManager:
                 lines.append(f"Node: {obj_id}" if obj_id else "Node")
                 if ws_type:
                     lines.append(f"Type: {ws_type}")
+                ss_function = attrs.get("ss_function")
+                if ss_function is not None and ss_function != "":
+                    function_text = resolve_value_list(
+                        self.SPECIAL_STRUCTURE_FUNCTION_VL, ss_function
+                    )
+                    lines.append(f"Function: {function_text or ss_function}")
                 bottom_level = self._manholeBottomLevelValue(attrs)
                 if bottom_level is None:
                     lines.append(f"Level: {self.MISSING_DATA_HTML}")
