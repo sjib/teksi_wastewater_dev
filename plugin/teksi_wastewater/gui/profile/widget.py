@@ -117,6 +117,7 @@ class TwwElevationProfileWidget(QWidget):
 
         self._hover_manager.clearState()
         self.canvas.setManholeDashes([])
+        self.canvas.setReachBands([])
         self._profile_curve_geom = None
 
         # Note: canvas.clear() crashes QGIS; use empty curve + refresh instead
@@ -181,6 +182,12 @@ class TwwElevationProfileWidget(QWidget):
                 self._profile_curve_geom,
                 self._manhole_dash_tolerance,
                 self.canvas.manholeDefaultPxWidth(),
+            )
+        )
+        self.canvas.setReachBands(
+            self._layer_setup.buildReachBands(
+                self._profile_curve_geom,
+                self._manhole_dash_tolerance,
             )
         )
 

@@ -22,7 +22,9 @@
 #
 # ---------------------------------------------------------------------
 
-from qgis.core import QgsFeatureRequest
+import math
+
+from qgis.core import QgsFeatureRequest, QgsProfilePoint
 from qgis.gui import QgsHighlight
 from qgis.PyQt.QtCore import QPoint, QPointF, Qt
 from qgis.PyQt.QtGui import QColor
@@ -31,8 +33,8 @@ from qgis.PyQt.QtWidgets import QLabel
 from ...utils.twwlayermanager import TwwLayerManager
 from .layer_setup import (
     _feature_attributes,
-    _resolve_manhole_anchors,
     _to_float,
+    reach_band_px,
     resolve_value_list,
 )
 
@@ -172,6 +174,47 @@ class ProfileHoverManager:
         """Handle hover using raw canvas pixel coordinates."""
         if not hasattr(self._canvas, "canvasPointToPlotPoint"):
             return
+        if hasattr(self._canvas, "snapToPlot"):
+            try:
+                self._canvas.snapToPlot(pos)
+            except Exception:
+                pass
+
+        profile_point = self._canvas.canvasPointToPlotPoint(QPointF(pos))
+        if self._isEmptyProfilePoint(profile_point):
+            plot_point = None
+        else:
+            plot_point = self._profilePointToPlotPoint(profile_point)
+
+        # Structures are a pixel-space overlay whose exaggerated shafts can
+        # extend beyond the plot area (a cover cap pushed above the top axis).
+        # Hit-test them first, before the plot-area check, so the whole drawn
+        # shaft — cover included — stays hoverable and a structure under the
+        # cursor wins over the reach beneath it.
+        # Cover cap first (its band sits on top of the shaft body), so hovering
+        # the cover shows a dedicated cover tooltip; the body shows the manhole.
+        cover_match = self._identifyCoverDash(plot_point)
+        if cover_match is not None:
+            self._last_hover_match = cover_match
+            cover_point = cover_match.get("plot_point")
+            self._showHoverTooltip(cover_point, cover_match)
+            self._highlightMatchOnMap(cover_point, cover_match)
+            return
+
+        structure_match = self._identifyManholeDash(plot_point)
+        if structure_match is not None:
+            self._last_hover_match = structure_match
+            structure_point = structure_match.get("plot_point")
+            self._showHoverTooltip(structure_point, structure_match)
+            self._highlightMatchOnMap(structure_point, structure_match)
+            return
+
+        # No structure under the cursor → reach/surface hover, which is only
+        # valid inside the plot area. (Structures are checked above because their
+        # exaggerated shafts can legitimately stick out beyond it.)
+        if plot_point is None:
+            self.clearState()
+            return
         if hasattr(self._canvas, "plotArea"):
             try:
                 plot_area = self._canvas.plotArea()
@@ -180,15 +223,6 @@ class ProfileHoverManager:
                     return
             except Exception:
                 pass
-        if hasattr(self._canvas, "snapToPlot"):
-            try:
-                self._canvas.snapToPlot(pos)
-            except Exception:
-                pass
-        profile_point = self._canvas.canvasPointToPlotPoint(QPointF(pos))
-        if self._isEmptyProfilePoint(profile_point):
-            self.clearState()
-            return
         self._updateHoverMatch(profile_point)
 
     def _updateHoverMatch(self, profile_point):
@@ -216,6 +250,17 @@ class ProfileHoverManager:
 
         nearest = self._nearestIdentifyResult(identify_results, plot_point)
 
+        # QGIS identify() on a profile matches a reach by horizontal proximity
+        # only, so a cursor far above/below the pipe still hits it. Reject a reach
+        # match unless the cursor is actually near the drawn pipe band.
+        if (
+            nearest is not None
+            and self._matchIsReach(nearest)
+            and not self._cursorNearReachBand(plot_point)
+        ):
+            self.clearState()
+            return
+
         if nearest:
             self._last_hover_match = nearest
 
@@ -230,94 +275,230 @@ class ProfileHoverManager:
     # Manhole dash hit-test
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _rectPointDistance(rect, point):
+        """Pixel distance from a point to a QRectF (0 when the point is inside)."""
+        dx = max(rect.left() - point.x(), 0.0, point.x() - rect.right())
+        dy = max(rect.top() - point.y(), 0.0, point.y() - rect.bottom())
+        return math.hypot(dx, dy)
+
+    def _hoverCanvasCursors(self, plot_point):
+        """
+        Cursor position(s) in the canvas-point space the hit rects use.
+
+        The rects come from plotPointToCanvasPoint. The raw mouse event.pos() is
+        normally the same space, but can differ (view transform / HiDPI scaling),
+        which would silently miss every box. So we also round-trip the plot point
+        back through plotPointToCanvasPoint, which is guaranteed to land in the
+        rects' space; either cursor matching the box counts as a hit.
+        """
+        cursors = []
+        if self._last_hover_pos is not None:
+            cursors.append(QPointF(self._last_hover_pos))
+        if plot_point is not None and hasattr(self._canvas, "plotPointToCanvasPoint"):
+            try:
+                converted = self._canvas.plotPointToCanvasPoint(
+                    QgsProfilePoint(float(plot_point.x()), float(plot_point.y()))
+                )
+                if converted is not None and not (
+                    hasattr(converted, "isEmpty") and converted.isEmpty()
+                ):
+                    cursors.append(QPointF(converted.x(), converted.y()))
+            except (TypeError, ValueError):
+                pass
+        return cursors
+
+    def _nearestDashInRects(self, hit_rects, plot_point, tolerance=8.0):
+        """
+        Nearest dash whose (padded) rect is within ``tolerance`` px of the cursor.
+
+        Hit-tests in CANVAS PIXEL space, because the shafts are drawn in
+        exaggerated pixel space (their true levels collapse together at overview
+        zoom). The tolerance keeps small shafts / thin cover caps hoverable; the
+        cover band uses a tighter tolerance so it doesn't swallow the shaft body.
+        Returns the dash, or None.
+        """
+        if not hit_rects:
+            return None
+        cursors = self._hoverCanvasCursors(plot_point)
+        if not cursors:
+            return None
+
+        best_dash = None
+        best_dist = None
+        for dash, rect in hit_rects:
+            if rect is None:
+                continue
+            dist = min(self._rectPointDistance(rect, c) for c in cursors)
+            if dist > tolerance:
+                continue
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_dash = dash
+        return best_dash
+
     def _identifyManholeDash(self, plot_point):
-        """
-        Identify custom-drawn manhole dashes (not in layers, drawn via ManholeDashPlotItem).
-
-        :param plot_point: QPointF with (distance, elevation) in plot coordinates.
-        :return: Fake identify-result dict, or None if no match.
-        """
-        if not hasattr(self._canvas, "getManholeDashes"):
+        """Identify the whole-manhole shaft under the cursor (body, not the cap)."""
+        if not hasattr(self._canvas, "getManholeDashHitRects"):
             return None
-        manhole_dashes = self._canvas.getManholeDashes()
-        if not manhole_dashes:
+        dash = self._nearestDashInRects(
+            self._canvas.getManholeDashHitRects(), plot_point
+        )
+        if dash is None:
             return None
 
-        distance = plot_point.x()
-        elevation = plot_point.y()
+        dash_distance = dash.get("distance")
+        cover_level = dash.get("cover_level")
+        bottom_level = dash.get("bottom_level")
+        rep_level = cover_level
+        if rep_level is None:
+            rep_level = bottom_level
+        if rep_level is None:
+            rep_level = dash.get("invert_level")
 
-        tolerance_dist = 5.0
-        tolerance_elev = 5.0
+        result_point = plot_point
+        if dash_distance is not None and rep_level is not None:
+            result_point = QPointF(dash_distance, rep_level)
 
-        best_match = None
-        best_distance2 = float("inf")
+        return {
+            "layer": None,
+            "result": {
+                "feature": None,
+                "attributes": {
+                    "obj_id": dash.get("obj_id"),
+                    "ws_type": dash.get("ws_type", "manhole"),
+                    "co_level": cover_level,
+                    "wn_bottom_level": bottom_level,
+                    "cover_level_missing": dash.get("cover_level_missing", False),
+                    "bottom_level_missing": dash.get("bottom_level_missing", False),
+                    "_cover_label": dash.get("_cover_label"),
+                    "_bottom_label": dash.get("_bottom_label"),
+                    "_input_label": dash.get("_input_label"),
+                    "_output_label": dash.get("_output_label"),
+                    "ma_dimension1": dash.get("dim1_mm"),
+                    "_is_manhole_dash": True,
+                },
+                "distance": dash_distance,
+                "elevation": rep_level,
+            },
+            "plot_point": result_point,
+            # Cursor is literally inside the drawn box → win over reach identify.
+            "distance2": 0.0,
+        }
 
-        for dash in manhole_dashes:
-            dash_distance = dash.get("distance")
-            cover_level = dash.get("cover_level")
-            bottom_level = dash.get("bottom_level")
+    def _identifyCoverDash(self, plot_point):
+        """Identify the cover cap under the cursor → a dedicated cover tooltip."""
+        if not hasattr(self._canvas, "getCoverHitRects"):
+            return None
+        # Tighter tolerance than the body so the cover band stays confined to the
+        # cap and doesn't make the manhole body hard to hover.
+        dash = self._nearestDashInRects(
+            self._canvas.getCoverHitRects(), plot_point, tolerance=4.0
+        )
+        if dash is None:
+            return None
 
-            if dash_distance is None:
-                continue
+        dash_distance = dash.get("distance")
+        cover_level = dash.get("cover_level")
+        result_point = plot_point
+        if dash_distance is not None and cover_level is not None:
+            result_point = QPointF(dash_distance, cover_level)
 
-            # Both levels missing: the dashed "?" shaft is anchored to the
-            # adjacent reach invert, so hit-test a band around that anchor.
-            if dash.get("cover_level_missing") and dash.get("bottom_level_missing"):
-                anchor_level = dash.get("anchor_level")
-                if anchor_level is None:
-                    continue
-                eff_cover = eff_bottom = anchor_level
-            elif cover_level is None and bottom_level is None:
-                continue
-            else:
-                eff_cover, eff_bottom = _resolve_manhole_anchors(cover_level, bottom_level)
-
-            dist_diff = abs(distance - dash_distance)
-            if dist_diff > tolerance_dist:
-                continue
-
-            min_elev = min(eff_bottom, eff_cover) - tolerance_elev
-            max_elev = max(eff_bottom, eff_cover) + tolerance_elev
-
-            if not (min_elev <= elevation <= max_elev):
-                continue
-
-            center_elev = (eff_cover + eff_bottom) / 2
-            elev_diff = abs(elevation - center_elev)
-            distance2 = dist_diff * dist_diff + elev_diff * elev_diff
-
-            if distance2 < best_distance2:
-                best_distance2 = distance2
-                best_match = {
-                    "layer": None,
-                    "result": {
-                        "feature": None,
-                        "attributes": {
-                            "obj_id": dash.get("obj_id"),
-                            "ws_type": dash.get("ws_type", "manhole"),
-                            "co_level": cover_level,
-                            "wn_bottom_level": bottom_level,
-                            "cover_level_missing": dash.get("cover_level_missing", False),
-                            "bottom_level_missing": dash.get("bottom_level_missing", False),
-                            "_cover_label": dash.get("_cover_label"),
-                            "_bottom_label": dash.get("_bottom_label"),
-                            "_input_label": dash.get("_input_label"),
-                            "_output_label": dash.get("_output_label"),
-                            "ma_dimension1": dash.get("dim1_mm"),
-                            "_is_manhole_dash": True,
-                        },
-                        "distance": dash_distance,
-                        "elevation": center_elev,
-                    },
-                    "plot_point": QPointF(dash_distance, center_elev),
-                    "distance2": distance2,
-                }
-
-        return best_match
+        return {
+            "layer": None,
+            "result": {
+                "feature": None,
+                "attributes": {
+                    "co_obj_id": dash.get("co_obj_id"),
+                    "co_level": cover_level,
+                    "co_material": dash.get("co_material"),
+                    "co_shape": dash.get("co_shape"),
+                    "co_brand": dash.get("co_brand"),
+                    "_is_cover_dash": True,
+                },
+                "distance": dash_distance,
+                "elevation": cover_level,
+            },
+            "plot_point": result_point,
+            "distance2": 0.0,
+        }
 
     # ------------------------------------------------------------------
     # Identify result helpers
     # ------------------------------------------------------------------
+
+    def _matchIsReach(self, match):
+        """True when the match resolves to a reach feature."""
+        attrs, layer_name, _feature, _layer = self._attrsFromMatch(match)
+        return self._isReachHover(layer_name, attrs)
+
+    def _cursorNearReachBand(self, plot_point):
+        """
+        True when the cursor sits on (or within a few px of) a drawn pipe band.
+
+        identify() only checks horizontal proximity, so this adds the missing
+        vertical check in pixel space using the band geometry the canvas drew.
+        """
+        if plot_point is None or not hasattr(self._canvas, "getReachBands"):
+            return True
+        bands = self._canvas.getReachBands()
+        if not bands:
+            return True  # no band data → don't over-filter
+        cursors = self._hoverCanvasCursors(plot_point)
+        if not cursors:
+            return True
+        cursor = cursors[-1]  # the round-trip (canvas-space) cursor when available
+
+        distance = plot_point.x()
+        margin = 12.0
+        for band in bands:
+            invert = band.get("invert") or []
+            invert_z = self._interpolateInvertZ(invert, distance)
+            if invert_z is None:
+                continue
+            invert_pt = self._plotToCanvasPoint(distance, invert_z)
+            if invert_pt is None:
+                continue
+            band_px = reach_band_px(band.get("clear_height_mm")) or 2.0
+            # The band is drawn from the invert upward (soffit above = smaller y).
+            top = invert_pt.y() - band_px - margin
+            bottom = invert_pt.y() + margin
+            if top <= cursor.y() <= bottom:
+                return True
+        return False
+
+    @staticmethod
+    def _interpolateInvertZ(invert, distance):
+        """Linear-interpolate the invert Z at a distance; None when out of range."""
+        if len(invert) < 2:
+            return None
+        if distance < invert[0][0] or distance > invert[-1][0]:
+            return None
+        for i in range(len(invert) - 1):
+            d0, z0 = invert[i]
+            d1, z1 = invert[i + 1]
+            if d0 <= distance <= d1:
+                if d1 == d0:
+                    return z0
+                ratio = (distance - d0) / (d1 - d0)
+                return z0 + (z1 - z0) * ratio
+        return None
+
+    def _plotToCanvasPoint(self, distance, elevation):
+        """Convert a (distance, elevation) plot point to canvas pixels, or None."""
+        if not hasattr(self._canvas, "plotPointToCanvasPoint"):
+            return None
+        try:
+            converted = self._canvas.plotPointToCanvasPoint(
+                QgsProfilePoint(float(distance), float(elevation))
+            )
+        except (TypeError, ValueError):
+            return None
+        if converted is None or (
+            hasattr(converted, "isEmpty") and converted.isEmpty()
+        ):
+            return None
+        return QPointF(converted.x(), converted.y())
 
     def _nearestIdentifyResult(self, identify_results, plot_point):
         """Pick the nearest identify result to a plot point."""
@@ -474,7 +655,7 @@ class ProfileHoverManager:
         lines = []
 
         is_reach = self._isReachHover(layer_name, attrs)
-        is_cover = self._isCoverHover(layer_name)
+        is_cover = self._isCoverHover(layer_name, attrs)
         is_manhole = self._isManholeHover(layer_name, attrs)
 
         if is_reach:
@@ -622,7 +803,9 @@ class ProfileHoverManager:
             and attrs.get(self.REACH_LENGTH_EFFECTIVE) is not None
         )
 
-    def _isCoverHover(self, layer_name):
+    def _isCoverHover(self, layer_name, attrs=None):
+        if attrs and attrs.get("_is_cover_dash"):
+            return True
         layer_name_lower = (layer_name or "").lower()
         return "cover" in layer_name_lower and "wastewater_node" not in layer_name_lower
 
@@ -658,7 +841,7 @@ class ProfileHoverManager:
         attrs, layer_name, _feature, _layer = self._attrsFromMatch(match)
 
         is_reach = self._isReachHover(layer_name, attrs)
-        is_cover = self._isCoverHover(layer_name)
+        is_cover = self._isCoverHover(layer_name, attrs)
         is_manhole = self._isManholeHover(layer_name, attrs)
 
         if is_reach:
@@ -787,6 +970,13 @@ class ProfileHoverManager:
 
         if isinstance(result, dict):
             attrs = result.get("attributes") or {}
+            if attrs.get("_is_cover_dash"):
+                co_obj_id = attrs.get("co_obj_id")
+                if co_obj_id:
+                    return ("cover", co_obj_id)
+                distance = result.get("distance")
+                if distance is not None:
+                    return ("cover", distance)
             if attrs.get("_is_manhole_dash"):
                 obj_id = attrs.get("obj_id")
                 if obj_id:

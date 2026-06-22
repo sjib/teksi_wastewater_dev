@@ -45,7 +45,23 @@ from qgis.PyQt.QtGui import QColor
 from ...utils.database_utils import DatabaseUtils
 from ...utils.twwlayermanager import TwwLayerManager
 
-MANHOLE_DEFAULT_PX_WIDTH = 10
+# Narrowest schematic shaft width (px); also the fallback when ma_dimension1 is
+# missing, so a manhole with no known width reads as the thinnest, not the widest.
+MANHOLE_DEFAULT_PX_WIDTH = 14
+
+# Schematic manhole shaft height (px). Real shaft depth (2-10 m) is sub-pixel
+# once a whole network's relief is in view, so the height is exaggerated and
+# proportional — clamped to this range — while the bottom stays at the true level.
+MANHOLE_MIN_SHAFT_PX = 12.0
+MANHOLE_MAX_SHAFT_PX = 70.0
+
+# The shaft is anchored at the pipe invert (rp level) and split into two
+# exaggerated segments: invert->cover (up) and invert->floor / sump (down).
+# Same px-per-metre gain for both so their ratio stays truthful; small minimums
+# keep the cover clearly above and the floor clearly below the pipe.
+MANHOLE_VERTICAL_GAIN_PX = 6.0
+MANHOLE_MIN_COVER_PX = 10.0
+MANHOLE_MIN_SUMP_PX = 3.0
 
 
 class ProfileLayerSetup:
@@ -110,8 +126,10 @@ class ProfileLayerSetup:
                 "Reach/Pipe segments",
                 "features",
                 {
+                    # Thin invert reference only; the pipe itself is the
+                    # exaggerated band drawn by ManholeDashPlotItem on top.
                     "line": "#1A5276",
-                    "line_width": 4.0,
+                    "line_width": 1.2,
                     "fill": "#1A527620",
                     "marker": "#5DADE2",
                     "marker_size": 4,
@@ -122,32 +140,12 @@ class ProfileLayerSetup:
                     "outline_width": 1.0,
                 },
             ),
-            (
-                "vw_wastewater_node",
-                "Wastewater nodes",
-                "features",
-                {
-                    "line": "#8E44AD",
-                    "line_width": 1.0,
-                    "fill": "#8E44AD30",
-                    "marker": "#8E44AD",
-                    "marker_size": 5,
-                },
-            ),
-            (
-                "vw_cover",
-                "Covers",
-                "features",
-                {
-                    "line": "#00000000",
-                    "line_width": 0.1,
-                    "fill": "#00000000",
-                    "marker": "#27AE60",
-                    "marker_size": 6,
-                    "marker_outline": "#1E8449",
-                    "marker_name": "circle",
-                },
-            ),
+            # vw_wastewater_node and vw_cover are intentionally NOT rendered: at
+            # network-overview zoom their markers collapse onto the pipe invert
+            # (co_level, wn_bottom_level and rp level are all within sub-pixel),
+            # which contradicts the exaggerated shaft. The manhole is now drawn
+            # entirely by the overlay shaft — floor edge = wn_bottom_level, cover
+            # line = co_level — anchored at the true pipe invert (rp level).
             (
                 "vw_change_points",
                 "Change points",
@@ -350,13 +348,11 @@ class ProfileLayerSetup:
             dim1_mm = entry["dim1_mm"]
             cover_missing = entry["cover_level_missing"]
             bottom_missing = entry["bottom_level_missing"]
-            # No level at all → anchor the dashed "?" shaft to the adjacent reach
-            # invert instead of fabricating a Z. None when no Z reach is nearby.
-            anchor_level = (
-                self._adjacentReachLevel(geometry)
-                if cover_missing and bottom_missing
-                else None
-            )
+            # Pipe-invert level at this structure (rp_from/to_level), taken as the
+            # nearest reach vertex Z. This is the TRUE-elevation anchor the shaft
+            # is built around: cover sits above it, floor (wn_bottom_level) below
+            # it (the sump). None when no Z reach is near → fall back to bottom.
+            invert_level = self._adjacentReachLevel(geometry)
             dashes.append(
                 {
                     "distance": float(distance_along),
@@ -366,12 +362,16 @@ class ProfileLayerSetup:
                     "bottom_level": entry["bottom_level"],
                     "cover_level_missing": cover_missing,
                     "bottom_level_missing": bottom_missing,
-                    "anchor_level": anchor_level,
+                    "invert_level": invert_level,
                     "dim1_mm": entry["dim1_mm"],
                     "_cover_label": entry.get("_cover_label"),
                     "_bottom_label": entry.get("_bottom_label"),
                     "_input_label": entry.get("_input_label"),
                     "_output_label": entry.get("_output_label"),
+                    "co_obj_id": entry.get("co_obj_id"),
+                    "co_material": entry.get("co_material"),
+                    "co_shape": entry.get("co_shape"),
+                    "co_brand": entry.get("co_brand"),
                     "width": manhole_dash_width(dim1_mm, default_px_width),
                 }
             )
@@ -417,6 +417,69 @@ class ProfileLayerSetup:
             best_z = z_value
 
         return best_z
+
+    def buildReachBands(self, profile_curve_geom, tolerance):
+        """
+        Build pipe-band overlay data along the profile curve.
+
+        QGIS renders each reach as a single invert line; to show the pipe height
+        the canvas needs the invert *and* the clear height so it can draw the
+        soffit above. The invert is anchored to the true level (Z); the soffit
+        is offset upward by an exaggerated pixel thickness (see reach_band_px),
+        because the real clear height is sub-pixel at network-overview zoom.
+        This returns, per reach, the invert vertices as (distance, invert_Z)
+        plus raw clear_height in mm (None when missing — only the invert line is
+        then drawn, never a fabricated height).
+
+        Reuses the temp reach layer (LineStringZ, Z = interpolated invert).
+        """
+        if (
+            self._temp_reach_layer is None
+            or profile_curve_geom is None
+            or profile_curve_geom.isEmpty()
+        ):
+            return []
+
+        bands = []
+        for feat in self._temp_reach_layer.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            try:
+                if profile_curve_geom.distance(geom) > tolerance:
+                    continue
+            except Exception:
+                pass
+
+            points = []
+            for vertex in geom.vertices():
+                z_value = vertex.z()
+                if z_value is None or math.isnan(z_value):
+                    continue
+                try:
+                    distance_along = profile_curve_geom.lineLocatePoint(
+                        QgsGeometry(QgsPoint(vertex.x(), vertex.y()))
+                    )
+                except Exception:
+                    continue
+                if distance_along is None or distance_along < 0:
+                    continue
+                points.append((float(distance_along), float(z_value)))
+
+            if len(points) < 2:
+                continue
+            points.sort(key=lambda item: item[0])
+
+            attrs = _feature_attributes(feat)
+            bands.append(
+                {
+                    "obj_id": attrs.get("obj_id"),
+                    "invert": points,
+                    "clear_height_mm": _to_float(attrs.get("clear_height")),
+                }
+            )
+
+        return bands
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -635,6 +698,11 @@ class ProfileLayerSetup:
                     "_bottom_label": attrs.get("_bottom_label"),
                     "_input_label": attrs.get("_input_label"),
                     "_output_label": attrs.get("_output_label"),
+                    # Cover attributes for the dedicated cover-cap tooltip.
+                    "co_obj_id": attrs.get("co_obj_id"),
+                    "co_material": attrs.get("co_material"),
+                    "co_shape": attrs.get("co_shape"),
+                    "co_brand": attrs.get("co_brand"),
                 }
             )
 
@@ -825,10 +893,68 @@ def _resolve_manhole_anchors(cover_level, bottom_level):
 
 
 def manhole_dash_width(dim1_mm, default_px=MANHOLE_DEFAULT_PX_WIDTH):
-    """Shaft line width in pixels from ma_dimension1 (mm)."""
+    """
+    Shaft width in pixels from ma_dimension1 (mm).
+
+    A manhole is ~0.6-0.9 m wide, which on the distance axis (hundreds of
+    metres) would be sub-pixel — so width is a *schematic, exaggerated* glyph,
+    not to scale. ``dim1_mm / 25`` spreads the narrow real range across a
+    readable 14-48 px band so bigger manholes look bigger; the true dimension
+    stays in the tooltip. Missing dimension falls back to the narrowest width.
+    """
     if dim1_mm is None:
         return default_px
-    return max(6.0, min(16.0, float(dim1_mm) / 100.0))
+    return max(14.0, min(48.0, float(dim1_mm) / 25.0))
+
+
+def reach_band_px(clear_height_mm):
+    """
+    Schematic pipe-band thickness in px from clear_height (mm).
+
+    Real clear heights (0.08-2 m) are sub-pixel on the elevation axis once a
+    whole network's relief is in view, so thickness is an *exaggerated,
+    proportional* glyph (bigger pipe -> thicker band), not the true height in
+    metres. Missing clear_height returns None -> only the invert line is drawn.
+    """
+    if clear_height_mm is None:
+        return None
+    return max(6.0, min(50.0, float(clear_height_mm) / 40.0))
+
+
+def manhole_shaft_px(depth_m):
+    """
+    Schematic manhole shaft height in px from the real depth (cover-bottom, m).
+
+    Fallback used only when the pipe-invert level is unknown; otherwise the
+    shaft is split into cover and sump offsets around the invert (see below).
+    Exaggerated and proportional so a deeper manhole looks taller at any zoom.
+    """
+    if depth_m is None or depth_m <= 0:
+        return MANHOLE_MIN_SHAFT_PX
+    return max(
+        MANHOLE_MIN_SHAFT_PX,
+        min(MANHOLE_MAX_SHAFT_PX, float(depth_m) * MANHOLE_VERTICAL_GAIN_PX),
+    )
+
+
+def manhole_cover_offset_px(cover_above_invert_m):
+    """Exaggerated px from the pipe invert UP to the cover (co_level - rp)."""
+    if cover_above_invert_m is None or cover_above_invert_m <= 0:
+        return MANHOLE_MIN_COVER_PX
+    return max(
+        MANHOLE_MIN_COVER_PX,
+        min(MANHOLE_MAX_SHAFT_PX, float(cover_above_invert_m) * MANHOLE_VERTICAL_GAIN_PX),
+    )
+
+
+def manhole_sump_offset_px(invert_above_floor_m):
+    """Exaggerated px from the pipe invert DOWN to the floor (rp - wn_bottom_level)."""
+    if invert_above_floor_m is None or invert_above_floor_m <= 0:
+        return MANHOLE_MIN_SUMP_PX
+    return max(
+        MANHOLE_MIN_SUMP_PX,
+        min(MANHOLE_MAX_SHAFT_PX, float(invert_above_floor_m) * MANHOLE_VERTICAL_GAIN_PX),
+    )
 
 
 # ------------------------------------------------------------------
