@@ -387,6 +387,13 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         soffit_pen = QPen(invert_color, 1.0)
         soffit_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
 
+        # Map plot points to canvas pixels with our own linear transform rather
+        # than plotPointToCanvasPoint, which returns nothing for points outside
+        # the visible range — that dropped the off-screen end of a partly-visible
+        # reach, leaving only the thin QGIS line until the whole reach was panned
+        # into view. Off-screen vertices now project and the clip rect trims them.
+        mapper = self._plotToCanvasMapper()
+
         if plot_area is not None and not plot_area.isEmpty():
             painter.save()
             painter.setClipRect(plot_area)
@@ -396,7 +403,7 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             if len(invert) < 2:
                 continue
 
-            invert_pts = self._projectInvert(invert)
+            invert_pts = self._projectInvert(invert, mapper)
             if len(invert_pts) < 2:
                 continue
 
@@ -420,11 +427,55 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         if plot_area is not None and not plot_area.isEmpty():
             painter.restore()
 
-    def _projectInvert(self, invert):
-        """Project (distance, invert_Z) vertices to canvas points."""
+    def _plotToCanvasMapper(self):
+        """
+        Linear (distance, elevation) → canvas-pixel mapper from the visible plot
+        ranges and plot area, or None when the canvas can't supply them. Unlike
+        plotPointToCanvasPoint it also maps points outside the visible range, so
+        a band's off-screen end still projects (the clip rect trims the overflow).
+        """
+        canvas = self._canvas
+        if not (
+            hasattr(canvas, "plotArea")
+            and hasattr(canvas, "visibleDistanceRange")
+            and hasattr(canvas, "visibleElevationRange")
+        ):
+            return None
+        try:
+            area = canvas.plotArea()
+            dist_range = canvas.visibleDistanceRange()
+            elev_range = canvas.visibleElevationRange()
+        except Exception:
+            return None
+        if area is None or area.isEmpty():
+            return None
+        d_lo, d_hi = dist_range.lower(), dist_range.upper()
+        e_lo, e_hi = elev_range.lower(), elev_range.upper()
+        if d_hi == d_lo or e_hi == e_lo:
+            return None
+
+        left, right = area.left(), area.right()
+        top, bottom = area.top(), area.bottom()
+
+        def mapper(distance, elevation):
+            fx = (distance - d_lo) / (d_hi - d_lo)
+            fy = (elevation - e_lo) / (e_hi - e_lo)
+            return QPointF(left + fx * (right - left), bottom - fy * (bottom - top))
+
+        return mapper
+
+    def _projectInvert(self, invert, mapper=None):
+        """
+        Project (distance, invert_Z) vertices to canvas points. In-range vertices
+        use plotPointToCanvasPoint so they stay pixel-aligned with the shafts and
+        QGIS line; the mapper is only the fallback for vertices it returns nothing
+        for (outside the visible range), so off-screen ends still project.
+        """
         points = []
         for distance, z_value in invert:
             pt = self._plotPointToCanvasPoint(distance, z_value)
+            if pt is None and mapper is not None:
+                pt = mapper(distance, z_value)
             if pt is not None:
                 points.append(pt)
         return points
