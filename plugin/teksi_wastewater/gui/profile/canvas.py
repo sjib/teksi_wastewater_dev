@@ -151,6 +151,7 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
 
         manhole_color = getattr(self._canvas, "_manhole_shaft_color", QColor("#6E4C1E"))
         structure_color = getattr(self._canvas, "_structure_shaft_color", QColor("#0E6655"))
+        special_color = getattr(self._canvas, "_special_structure_shaft_color", QColor("#E67E22"))
         cover_color = getattr(self._canvas, "_manhole_cover_color", QColor("#2C3E50"))
         chamber_color = getattr(self._canvas, "_manhole_chamber_color", QColor("#FFFFFF"))
         default_px_width = getattr(self._canvas, "_manhole_default_px_width", MANHOLE_DEFAULT_PX_WIDTH)
@@ -173,10 +174,15 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             if distance is None:
                 continue
 
-            # Non-manhole structures (special_structure, discharge_point, ...) are
-            # drawn in a distinct colour so the type reads at a glance.
-            is_manhole = str(dash.get("ws_type") or "").lower() == "manhole"
-            shaft_color = manhole_color if is_manhole else structure_color
+            # Colour by type so it reads at a glance: manhole brown,
+            # special_structure an eye-catching orange, other structures teal.
+            ws_type = str(dash.get("ws_type") or "").lower()
+            if ws_type == "manhole":
+                shaft_color = manhole_color
+            elif ws_type == "special_structure":
+                shaft_color = special_color
+            else:
+                shaft_color = structure_color
             shaft_pen = QPen(shaft_color, 1.5)
             shaft_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
 
@@ -628,7 +634,8 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
         self._hover_callback = None
         self._leave_callback = None
         self._manhole_shaft_color = QColor("#6E4C1E")  # Brown walls for actual manholes
-        self._structure_shaft_color = QColor("#0E6655")  # Teal walls for non-manhole structures
+        self._structure_shaft_color = QColor("#0E6655")  # Teal walls for other structures
+        self._special_structure_shaft_color = QColor("#E67E22")  # Orange for special structures
         self._manhole_cover_color = QColor("#2C3E50")  # Dark gray for the cover cap
         self._manhole_chamber_color = QColor("#FFFFFF")  # Opaque chamber interior
         self._reach_invert_color = QColor("#1A5276")  # Pipe band (matches reach line style)
