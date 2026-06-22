@@ -381,11 +381,13 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
 
         invert_color = getattr(self._canvas, "_reach_invert_color", QColor("#1A5276"))
         fill_color = QColor(invert_color)
-        fill_color.setAlpha(55)
-        invert_pen = QPen(invert_color, 1.4)
-        invert_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        soffit_pen = QPen(invert_color, 1.0)
-        soffit_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        fill_color.setAlpha(45)
+        # Invert and soffit drawn with the same width so the band reads as a clean
+        # pipe (the bottom edge used to look much heavier than the top).
+        edge_pen = QPen(invert_color, 1.2)
+        edge_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        invert_pen = edge_pen
+        soffit_pen = edge_pen
 
         # Map plot points to canvas pixels with our own linear transform rather
         # than plotPointToCanvasPoint, which returns nothing for points outside

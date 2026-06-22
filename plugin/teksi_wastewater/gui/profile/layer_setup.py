@@ -126,18 +126,19 @@ class ProfileLayerSetup:
                 "Reach/Pipe segments",
                 "features",
                 {
-                    # Thin invert reference only; the pipe itself is the
-                    # exaggerated band drawn by ManholeDashPlotItem on top.
+                    # Simple hairline (NOT the old hollow/outlined tube, whose
+                    # dark outlines made the band's bottom edge look heavy). Kept
+                    # only for identify/hover; the visible pipe is the exaggerated
+                    # band drawn by ManholeDashPlotItem on top, whose 1.2px bottom
+                    # edge covers this line so both band edges read the same.
                     "line": "#1A5276",
-                    "line_width": 1.2,
+                    "line_width": 0.3,
                     "fill": "#1A527620",
                     "marker": "#5DADE2",
                     "marker_size": 4,
                     "marker_outline": "#1A5276",
                     "marker_name": "circle",
-                    "hollow": True,
-                    "line_inner": "#E8F6FF",
-                    "outline_width": 1.0,
+                    "hollow": False,
                 },
             ),
             # vw_wastewater_node and vw_cover are intentionally NOT rendered: at
