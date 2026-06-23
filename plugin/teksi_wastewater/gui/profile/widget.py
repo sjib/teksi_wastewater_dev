@@ -278,6 +278,12 @@ class TwwElevationProfileWidget(QWidget):
         Set the profile curve from tree data (edges).
 
         Builds a polyline geometry from the edge list and calls setProfileCurve().
+        Reaches are stitched in traversal order, each oriented to the running
+        path and its shared junction vertex de-duplicated, so the curve never
+        zig-zags — mirroring TwwProfileMapTool.appendProfile (which orients by
+        node-point proximity). The path's reach ids and node points are
+        forwarded so only the selected path is rendered, not side branches that
+        merely share a node with it.
 
         :param edges: List of (from_node, to_node, edge_info) tuples.
         """
@@ -285,37 +291,69 @@ class TwwElevationProfileWidget(QWidget):
         if not reach_layer or not edges:
             return
 
+        # Reaches on the path, in traversal order. A reach can span several
+        # routing segments, so keep only the first occurrence of each obj_id.
         reach_ids = []
+        seen = set()
         for item in edges:
             item_info = item[2]
             if item_info.get("objType") == "reach":
                 base_feature = item_info.get("baseFeature")
-                if base_feature:
+                if base_feature and base_feature not in seen:
+                    seen.add(base_feature)
                     reach_ids.append(base_feature)
 
         if not reach_ids:
             return
 
-        reach_list = ",".join("'" + rid + "'" for rid in reach_ids if rid)
+        # Fetch each reach geometry once, keyed by obj_id.
+        reach_list = ",".join("'" + rid + "'" for rid in reach_ids)
         request = QgsFeatureRequest()
         request.setFilterExpression(f"obj_id IN ({reach_list})")
-
-        points = []
+        polyline_by_id = {}
         for feature in reach_layer.getFeatures(request):
             geometry = feature.geometry()
-            if geometry:
-                polyline = geometry.asPolyline()
-                if points:
-                    if points[-1] == polyline[0]:
-                        points.extend(polyline[1:])
-                    else:
-                        points.extend(polyline)
-                else:
-                    points.extend(polyline)
+            if geometry is None or geometry.isEmpty():
+                continue
+            polyline = geometry.asPolyline()
+            if polyline:
+                polyline_by_id[feature["obj_id"]] = polyline
 
-        if points:
+        # Reaches in traversal order, dropping any without usable geometry.
+        ordered = [list(polyline_by_id[rid]) for rid in reach_ids if rid in polyline_by_id]
+        if not ordered:
+            return
+
+        # Orient the first reach against the second so the whole chain connects
+        # head-to-tail; the loop then orients each remaining reach to the path.
+        if len(ordered) >= 2:
+            first, nxt = ordered[0], ordered[1]
+            nxt_ends = (nxt[0], nxt[-1])
+            if min(first[0].sqrDist(p) for p in nxt_ends) < min(
+                first[-1].sqrDist(p) for p in nxt_ends
+            ):
+                first.reverse()
+
+        points = []
+        node_points = []
+        for polyline in ordered:
+            if points:
+                tail = points[-1]
+                if tail.sqrDist(polyline[-1]) < tail.sqrDist(polyline[0]):
+                    polyline.reverse()
+            # Reach endpoints are the path's node positions (used to keep only
+            # the structures sitting on this path).
+            node_points.append(polyline[0])
+            node_points.append(polyline[-1])
+            if points and points[-1].sqrDist(polyline[0]) < 1e-6:
+                polyline = polyline[1:]
+            points.extend(polyline)
+
+        if len(points) >= 2:
             profile_geometry = QgsGeometry.fromPolylineXY(points)
-            self.setProfileCurve(profile_geometry)
+            self.setProfileCurve(
+                profile_geometry, reach_ids=reach_ids, node_points=node_points
+            )
 
     # ------------------------------------------------------------------
     # Canvas helpers
