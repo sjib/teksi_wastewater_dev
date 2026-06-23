@@ -95,8 +95,61 @@ class TwwElevationProfileWidget(QWidget):
         :param val: Vertical exaggeration value (e.g., 10 for 10x).
         """
         self.verticalExaggeration = float(val)
-        # TODO: Apply vertical exaggeration to canvas
-        # Note: QgsElevationProfileCanvas uses axisScaleRatio() which is read-only
+        if hasattr(self.canvas, "setVerticalExaggeration"):
+            self.canvas.setVerticalExaggeration(self.verticalExaggeration)
+        self._applyVerticalExaggeration()
+
+    def _veElevationSpan(self, dist_len):
+        """
+        Elevation span (m) to show so the vertical scale equals the horizontal
+        scale × the current V.E. The profile is drawn at TRUE scale, so the V.E.
+        is the only vertical magnification — a uniform viewing transform, not a
+        per-feature distortion. Returns None when the canvas can't supply sizes.
+        """
+        ve = getattr(self, "verticalExaggeration", 1.0) or 1.0
+        if ve <= 0 or dist_len <= 0 or not hasattr(self.canvas, "plotArea"):
+            return None
+        try:
+            area = self.canvas.plotArea()
+        except Exception:
+            return None
+        if area is None or area.isEmpty():
+            return None
+        plot_w = area.width()
+        plot_h = area.height()
+        if plot_w <= 0 or plot_h <= 0:
+            return None
+        horizontal_scale = plot_w / dist_len  # px per metre
+        vertical_scale = horizontal_scale * ve
+        return plot_h / vertical_scale  # elevation metres shown
+
+    def _applyVerticalExaggeration(self):
+        """Re-set the visible elevation range to honour the current V.E."""
+        canvas = self.canvas
+        if not (
+            hasattr(canvas, "visibleDistanceRange")
+            and hasattr(canvas, "visibleElevationRange")
+            and hasattr(canvas, "setVisiblePlotRange")
+        ):
+            return
+        try:
+            dist_range = canvas.visibleDistanceRange()
+            elev_range = canvas.visibleElevationRange()
+        except Exception:
+            return
+        dist_len = dist_range.upper() - dist_range.lower()
+        span = self._veElevationSpan(dist_len)
+        if span is None or span <= 0:
+            return
+        e_center = (elev_range.lower() + elev_range.upper()) / 2.0
+        try:
+            canvas.setVisiblePlotRange(
+                dist_range.lower(), dist_range.upper(),
+                e_center - span / 2.0, e_center + span / 2.0,
+            )
+            canvas.refresh()
+        except Exception:
+            pass
 
     def printProfile(self):
         """
@@ -210,6 +263,8 @@ class TwwElevationProfileWidget(QWidget):
                         d_max = dist_range.upper() + margin_dist
                         e_min = elev_range.lower() - margin_elev
                         e_max = elev_range.upper() + margin_elev
+                        # Initial view fits the whole profile (never clips the
+                        # relief); the V.E. slider zooms the vertical from here.
                         self.canvas.setVisiblePlotRange(d_min, d_max, e_min, e_max)
                         self.canvas.refresh()
                 except Exception:

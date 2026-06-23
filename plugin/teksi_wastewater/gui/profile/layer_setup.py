@@ -47,21 +47,9 @@ from ...utils.twwlayermanager import TwwLayerManager
 
 # Narrowest schematic shaft width (px); also the fallback when ma_dimension1 is
 # missing, so a manhole with no known width reads as the thinnest, not the widest.
+# (Width is on the distance axis, where true scale is sub-pixel, so it stays
+# schematic — heights are drawn at true elevation instead, see canvas.py.)
 MANHOLE_DEFAULT_PX_WIDTH = 14
-
-# Schematic manhole shaft height (px). Real shaft depth (2-10 m) is sub-pixel
-# once a whole network's relief is in view, so the height is exaggerated and
-# proportional — clamped to this range — while the bottom stays at the true level.
-MANHOLE_MIN_SHAFT_PX = 12.0
-MANHOLE_MAX_SHAFT_PX = 70.0
-
-# The shaft is anchored at the pipe invert (rp level) and split into two
-# exaggerated segments: invert->cover (up) and invert->floor / sump (down).
-# Same px-per-metre gain for both so their ratio stays truthful; small minimums
-# keep the cover clearly above and the floor clearly below the pipe.
-MANHOLE_VERTICAL_GAIN_PX = 6.0
-MANHOLE_MIN_COVER_PX = 10.0
-MANHOLE_MIN_SUMP_PX = 3.0
 
 
 class ProfileLayerSetup:
@@ -426,12 +414,10 @@ class ProfileLayerSetup:
 
         QGIS renders each reach as a single invert line; to show the pipe height
         the canvas needs the invert *and* the clear height so it can draw the
-        soffit above. The invert is anchored to the true level (Z); the soffit
-        is offset upward by an exaggerated pixel thickness (see reach_band_px),
-        because the real clear height is sub-pixel at network-overview zoom.
-        This returns, per reach, the invert vertices as (distance, invert_Z)
-        plus raw clear_height in mm (None when missing — only the invert line is
-        then drawn, never a fabricated height).
+        soffit at the true level (invert_Z + clear_height). This returns, per
+        reach, the invert vertices as (distance, invert_Z) plus raw clear_height
+        in mm (None when missing — only the invert line is then drawn, never a
+        fabricated height).
 
         Reuses the temp reach layer (LineStringZ, Z = interpolated invert).
         """
@@ -889,13 +875,6 @@ def _manhole_level_state(cover_level, bottom_level):
     return cover_level, bottom_level, cover_missing, bottom_missing
 
 
-def _resolve_manhole_anchors(cover_level, bottom_level):
-    """When one level is missing, anchor drawing/hit-test at the known level."""
-    anchor_cover = cover_level if cover_level is not None else bottom_level
-    anchor_bottom = bottom_level if bottom_level is not None else cover_level
-    return anchor_cover, anchor_bottom
-
-
 def manhole_dash_width(dim1_mm, default_px=MANHOLE_DEFAULT_PX_WIDTH):
     """
     Shaft width in pixels from ma_dimension1 (mm).
@@ -909,59 +888,6 @@ def manhole_dash_width(dim1_mm, default_px=MANHOLE_DEFAULT_PX_WIDTH):
     if dim1_mm is None:
         return default_px
     return max(14.0, min(48.0, float(dim1_mm) / 25.0))
-
-
-def reach_band_px(clear_height_mm):
-    """
-    Schematic pipe-band thickness in px from clear_height (mm).
-
-    Uses the SAME vertical exaggeration as the manhole (MANHOLE_VERTICAL_GAIN_PX),
-    so a pipe is always drawn smaller than the manhole it connects to — a pipe's
-    clear height is physically less than the manhole's depth, so a band taller
-    than its manhole (the old clear_height/40 ≈ 25 px/m, ~4× the manhole scale)
-    read wrong. A small minimum keeps thin pipes visible. Missing clear_height
-    returns None → only the invert line is drawn.
-    """
-    if clear_height_mm is None:
-        return None
-    px = (float(clear_height_mm) / 1000.0) * MANHOLE_VERTICAL_GAIN_PX
-    return max(4.0, min(MANHOLE_MAX_SHAFT_PX, px))
-
-
-def manhole_shaft_px(depth_m):
-    """
-    Schematic manhole shaft height in px from the real depth (cover-bottom, m).
-
-    Fallback used only when the pipe-invert level is unknown; otherwise the
-    shaft is split into cover and sump offsets around the invert (see below).
-    Exaggerated and proportional so a deeper manhole looks taller at any zoom.
-    """
-    if depth_m is None or depth_m <= 0:
-        return MANHOLE_MIN_SHAFT_PX
-    return max(
-        MANHOLE_MIN_SHAFT_PX,
-        min(MANHOLE_MAX_SHAFT_PX, float(depth_m) * MANHOLE_VERTICAL_GAIN_PX),
-    )
-
-
-def manhole_cover_offset_px(cover_above_invert_m):
-    """Exaggerated px from the pipe invert UP to the cover (co_level - rp)."""
-    if cover_above_invert_m is None or cover_above_invert_m <= 0:
-        return MANHOLE_MIN_COVER_PX
-    return max(
-        MANHOLE_MIN_COVER_PX,
-        min(MANHOLE_MAX_SHAFT_PX, float(cover_above_invert_m) * MANHOLE_VERTICAL_GAIN_PX),
-    )
-
-
-def manhole_sump_offset_px(invert_above_floor_m):
-    """Exaggerated px from the pipe invert DOWN to the floor (rp - wn_bottom_level)."""
-    if invert_above_floor_m is None or invert_above_floor_m <= 0:
-        return MANHOLE_MIN_SUMP_PX
-    return max(
-        MANHOLE_MIN_SUMP_PX,
-        min(MANHOLE_MAX_SHAFT_PX, float(invert_above_floor_m) * MANHOLE_VERTICAL_GAIN_PX),
-    )
 
 
 # ------------------------------------------------------------------

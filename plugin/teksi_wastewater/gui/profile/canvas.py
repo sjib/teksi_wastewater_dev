@@ -22,21 +22,12 @@
 #
 # ---------------------------------------------------------------------
 
-import math
-
 from qgis.core import QgsProfilePoint
 from qgis.PyQt.QtCore import QPointF, QRectF, Qt
 from qgis.PyQt.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygonF
 from qgis.gui import QgsElevationProfileCanvas, QgsPlotCanvasItem
 
-from .layer_setup import (
-    MANHOLE_DEFAULT_PX_WIDTH,
-    _resolve_manhole_anchors,
-    manhole_cover_offset_px,
-    manhole_shaft_px,
-    manhole_sump_offset_px,
-    reach_band_px,
-)
+from .layer_setup import MANHOLE_DEFAULT_PX_WIDTH
 
 # Pixel height of the dashed "no level data" shaft. Both manhole levels are
 # unknown, so the true height can't be derived — this is a fixed visual stand-in
@@ -121,6 +112,60 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             return None
         return QPointF(canvas_point.x(), canvas_point.y())
 
+    def _drawVeLabel(self, painter, plot_area):
+        """
+        Draw the 'V.E. = N×' readout in the plot's bottom-left corner. The factor
+        is measured from the CURRENT view (vertical px-per-m ÷ horizontal
+        px-per-m), so it stays honest whatever the zoom — not the nominal slider
+        value, which would be wrong while the initial view is fit-to-data.
+        """
+        ve = self._currentVerticalExaggeration(plot_area)
+        if ve is None or ve <= 0:
+            return
+        if plot_area is not None and not plot_area.isEmpty():
+            x = plot_area.left() + 10.0
+            y = plot_area.bottom() - 8.0
+        else:
+            x = self._rect.left() + 12.0
+            y = self._rect.bottom() - 12.0
+        painter.setFont(self._missingDataFont())
+        painter.setPen(QPen(QColor("#5F5E5A")))
+        shown = f"{ve:.1f}".rstrip("0").rstrip(".")
+        painter.drawText(QPointF(x, y), f"V.E. = {shown}×")
+
+    def _currentVerticalExaggeration(self, plot_area):
+        """Actual vertical exaggeration of the current view, or None."""
+        canvas = self._canvas
+        if plot_area is None or plot_area.isEmpty():
+            return None
+        if not (
+            hasattr(canvas, "visibleDistanceRange")
+            and hasattr(canvas, "visibleElevationRange")
+        ):
+            return None
+        try:
+            dist_range = canvas.visibleDistanceRange()
+            elev_range = canvas.visibleElevationRange()
+        except Exception:
+            return None
+        dist_len = dist_range.upper() - dist_range.lower()
+        elev_len = elev_range.upper() - elev_range.lower()
+        plot_w = plot_area.width()
+        plot_h = plot_area.height()
+        if dist_len <= 0 or elev_len <= 0 or plot_w <= 0 or plot_h <= 0:
+            return None
+        horizontal_scale = plot_w / dist_len
+        vertical_scale = plot_h / elev_len
+        return vertical_scale / horizontal_scale
+
+    def _projectPoint(self, distance, elevation, mapper):
+        """Project (distance, elevation) to canvas; fall back to the mapper when
+        plotPointToCanvasPoint returns nothing (point outside the visible range)."""
+        pt = self._plotPointToCanvasPoint(distance, elevation)
+        if pt is None and mapper is not None:
+            pt = mapper(distance, elevation)
+        return pt
+
     def _drawCoverCap(self, painter, cover_pt, half_width, cover_pen):
         """Cover drawn as a bold line with short side brackets (a '⊓' cap)."""
         painter.setPen(cover_pen)
@@ -141,6 +186,10 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         # Pipe bands first, so manhole shafts/cover lines draw on top of them.
         self._drawReachBands(painter, plot_area)
 
+        # Vertical-exaggeration readout (the whole vertical axis is magnified by
+        # this factor; everything else is true scale).
+        self._drawVeLabel(painter, plot_area)
+
         # Reset before the early return so an empty-dash frame can't leave stale
         # hover rects from the previous frame.
         self._hit_rects = []
@@ -159,6 +208,15 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         cover_pen = QPen(cover_color, 2.5)
         cover_pen.setStyle(Qt.PenStyle.SolidLine)
         cover_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+
+        # Structures are drawn at TRUE elevation (cover→bottom). The mapper
+        # projects off-range points so a partly-visible structure still draws;
+        # the clip rect trims the overflow.
+        mapper = self._plotToCanvasMapper()
+        clipped = plot_area is not None and not plot_area.isEmpty()
+        if clipped:
+            painter.save()
+            painter.setClipRect(plot_area)
 
         any_x = False
         any_question = False
@@ -186,10 +244,8 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             shaft_pen = QPen(shaft_color, 1.5)
             shaft_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
 
-            # No cover and no bottom level: nothing to position the shaft with.
-            # Anchor it to the pipe invert and draw a red dashed shaft topped
-            # with "?" — never fabricate a level (invert_level is None when no
-            # reach is near, in which case we skip rather than guess).
+            # Both levels missing → red dashed "?" shaft at the pipe invert (the
+            # only anchor available); never fabricate a level.
             if cover_missing and bottom_missing:
                 rect = self._drawNoLevelShaft(
                     painter, distance, dash.get("invert_level"), shaft_width_px, plot_area
@@ -202,51 +258,43 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             if cover_level is None and bottom_level is None:
                 continue
 
-            anchor_cover, anchor_bottom = _resolve_manhole_anchors(cover_level, bottom_level)
-
-            cover_pt = self._plotPointToCanvasPoint(distance, anchor_cover)
-            bottom_pt = self._plotPointToCanvasPoint(distance, anchor_bottom)
-            if cover_pt is None or bottom_pt is None:
-                continue
-
-            if plot_area is not None:
-                if not plot_area.contains(cover_pt) and not plot_area.contains(bottom_pt):
-                    continue
-
             half_width = shaft_width_px / 2.0
-            invert_level = dash.get("invert_level")
+            cover_pt = (
+                self._projectPoint(distance, cover_level, mapper)
+                if cover_level is not None
+                else None
+            )
+            bottom_pt = (
+                self._projectPoint(distance, bottom_level, mapper)
+                if bottom_level is not None
+                else None
+            )
+
+            ref_pt = cover_pt if cover_pt is not None else bottom_pt
+            if ref_pt is None:
+                continue
+            anchor_x = ref_pt.x()
+            # Horizontal cull: skip structures whose distance is off-screen.
+            if plot_area is not None and (
+                anchor_x < plot_area.left() - 20 or anchor_x > plot_area.right() + 20
+            ):
+                continue
+            left_x = anchor_x - half_width
+            right_x = anchor_x + half_width
 
             if not cover_missing and not bottom_missing:
-                # Build the chamber around the pipe invert (rp level), the true
-                # connection point of the band: cover sits an exaggerated offset
-                # above it, the floor (wn_bottom_level / sump) an exaggerated
-                # offset below it. All offsets are pixels because the real
-                # metre gaps are sub-pixel at overview zoom; their ratio is kept.
-                if invert_level is not None:
-                    invert_pt = self._plotPointToCanvasPoint(distance, invert_level)
-                    if invert_pt is None:
-                        continue
-                    anchor_x = invert_pt.x()
-                    top_y = invert_pt.y() - manhole_cover_offset_px(cover_level - invert_level)
-                    floor_y = invert_pt.y() + manhole_sump_offset_px(invert_level - bottom_level)
-                else:
-                    # No pipe invert nearby: fall back to a single exaggerated
-                    # shaft anchored at the true bottom level.
-                    anchor_x = bottom_pt.x()
-                    floor_y = bottom_pt.y()
-                    top_y = bottom_pt.y() - manhole_shaft_px(cover_level - bottom_level)
-
-                # Keep the cover inside the plot: a top-of-range manhole's
-                # exaggerated cover can land above the canvas, where it can't be
-                # hovered. Clamp the top down and keep a minimum chamber height.
-                if plot_area is not None and not plot_area.isEmpty():
-                    min_top = plot_area.top() + 2.0
-                    if top_y < min_top:
-                        top_y = min_top
-                        floor_y = max(floor_y, top_y + 8.0)
-
-                left_x = anchor_x - half_width
-                right_x = anchor_x + half_width
+                # Chamber from the true cover down to the true bottom; the band
+                # connects at the pipe invert in between. No exaggeration.
+                if cover_pt is None or bottom_pt is None:
+                    continue
+                top_y = cover_pt.y()
+                floor_y = bottom_pt.y()
+                # Vertical cull: whole chamber off-screen.
+                if plot_area is not None and (
+                    max(top_y, floor_y) < plot_area.top()
+                    or min(top_y, floor_y) > plot_area.bottom()
+                ):
+                    continue
 
                 # Opaque chamber fill drawn over the pipe band so the pipe visibly
                 # terminates at the chamber wall (it connects, not crosses).
@@ -288,31 +336,13 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                     )
                 )
             elif bottom_missing:
-                # Cover known, floor missing. Anchor at the pipe invert like a full
-                # manhole — chamber from the exaggerated cover down to the invert —
-                # and mark the missing floor with an X below, so it stays
-                # consistent with neighbours instead of collapsing onto the band.
-                invert_pt = (
-                    self._plotPointToCanvasPoint(distance, invert_level)
-                    if invert_level is not None
-                    else None
-                )
-                if invert_pt is not None:
-                    anchor_x = invert_pt.x()
-                    top_y = invert_pt.y() - manhole_cover_offset_px(cover_level - invert_level)
-                    base_y = invert_pt.y()
-                else:
-                    anchor_x = cover_pt.x()
-                    top_y = base_y = cover_pt.y()
-
-                left_x = anchor_x - half_width
-                right_x = anchor_x + half_width
-                if base_y > top_y:
-                    painter.setPen(shaft_pen)
-                    painter.drawLine(QPointF(left_x, top_y), QPointF(left_x, base_y))
-                    painter.drawLine(QPointF(right_x, top_y), QPointF(right_x, base_y))
+                # Cover known (true co_level), floor missing → cover cap + an X
+                # just below for the missing bottom (no fabricated shaft height).
+                if cover_pt is None:
+                    continue
+                top_y = cover_pt.y()
                 self._drawCoverCap(painter, QPointF(anchor_x, top_y), half_width, cover_pen)
-                x_center = QPointF(anchor_x, base_y + 18.0)
+                x_center = QPointF(anchor_x, top_y + 18.0)
                 self._drawMissingDataX(painter, x_center)
                 self._drawMissingLabel(painter, x_center, "no bottom level")
                 self._hit_rects.append(
@@ -339,48 +369,44 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                 )
                 any_x = True
             else:
-                # Bottom known, cover missing. Anchor at the pipe invert — chamber
-                # from the invert down to the exaggerated floor — and mark the
-                # missing cover with an X above.
-                invert_pt = (
-                    self._plotPointToCanvasPoint(distance, invert_level)
-                    if invert_level is not None
-                    else None
-                )
-                if invert_pt is not None:
-                    anchor_x = invert_pt.x()
-                    top_y = invert_pt.y()
-                    floor_y = invert_pt.y() + manhole_sump_offset_px(invert_level - bottom_level)
-                else:
-                    anchor_x = bottom_pt.x()
-                    top_y = floor_y = bottom_pt.y()
-
-                left_x = anchor_x - half_width
-                right_x = anchor_x + half_width
+                # Bottom known (true wn_bottom_level), cover missing → floor mark
+                # + an X just above for the missing cover.
+                if bottom_pt is None:
+                    continue
+                floor_y = bottom_pt.y()
                 painter.setPen(shaft_pen)
-                if floor_y > top_y:
-                    painter.drawLine(QPointF(left_x, top_y), QPointF(left_x, floor_y))
-                    painter.drawLine(QPointF(right_x, top_y), QPointF(right_x, floor_y))
                 painter.drawLine(QPointF(left_x, floor_y), QPointF(right_x, floor_y))
-                x_center = QPointF(anchor_x, top_y - 18.0)
+                x_center = QPointF(anchor_x, floor_y - 18.0)
                 self._drawMissingDataX(painter, x_center)
                 self._drawMissingLabel(painter, x_center, "no cover level")
                 self._hit_rects.append(
-                    (dash, QRectF(left_x - 4, x_center.y() - 10, shaft_width_px + 8, floor_y - (x_center.y() - 10)))
+                    (
+                        dash,
+                        QRectF(
+                            left_x - 8,
+                            x_center.y() - 10,
+                            shaft_width_px + 16,
+                            (floor_y + 8) - (x_center.y() - 10),
+                        ),
+                    )
                 )
                 any_x = True
+
+        if clipped:
+            painter.restore()
 
         if any_x or any_question:
             self._drawMissingLegend(painter, plot_area, any_x, any_question)
 
     def _drawReachBands(self, painter, plot_area):
         """
-        Draw each reach as a pipe band: the invert polyline anchored at the true
-        level, with the soffit offset by an exaggerated pixel thickness along the
-        pipe's normal (proportional to clear_height). Offsetting perpendicular to
-        the pipe — not straight up — keeps the band a constant visual thickness
-        regardless of slope/zoom; a vertical offset looked thin on steep reaches
-        and wide on flat ones. Reaches without a clear height fall back to a line.
+        Draw each reach as a pipe band between its invert and its soffit, both at
+        TRUE elevation: soffit = invert_Z + clear_height. The band's on-screen
+        thickness is therefore the real clear height at the plot's (vertical-
+        exaggeration-adjusted) scale — proportions are preserved, nothing is
+        fabricated. Reaches without a clear height fall back to a plain invert
+        line. Off-range vertices use a linear mapper so a partly-visible reach
+        still draws to the edges; the clip rect trims the overflow.
         """
         if not self._bands:
             return
@@ -388,18 +414,10 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         invert_color = getattr(self._canvas, "_reach_invert_color", QColor("#1A5276"))
         fill_color = QColor(invert_color)
         fill_color.setAlpha(45)
-        # Invert and soffit drawn with the same width so the band reads as a clean
-        # pipe (the bottom edge used to look much heavier than the top).
+        # Invert and soffit share one pen width so the band reads as a clean pipe.
         edge_pen = QPen(invert_color, 1.2)
         edge_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        invert_pen = edge_pen
-        soffit_pen = edge_pen
 
-        # Map plot points to canvas pixels with our own linear transform rather
-        # than plotPointToCanvasPoint, which returns nothing for points outside
-        # the visible range — that dropped the off-screen end of a partly-visible
-        # reach, leaving only the thin QGIS line until the whole reach was panned
-        # into view. Off-screen vertices now project and the clip rect trims them.
         mapper = self._plotToCanvasMapper()
 
         if plot_area is not None and not plot_area.isEmpty():
@@ -415,21 +433,26 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             if len(invert_pts) < 2:
                 continue
 
-            band_px = reach_band_px(band.get("clear_height_mm"))
-            if band_px is None:
-                painter.setPen(invert_pen)
+            clear_height_mm = band.get("clear_height_mm")
+            if clear_height_mm is None:
+                painter.setPen(edge_pen)
                 painter.drawPolyline(QPolygonF(invert_pts))
                 continue
 
-            soffit_pts = self._offsetAlongNormal(invert_pts, band_px)
+            clear_height_m = float(clear_height_mm) / 1000.0
+            soffit = [(distance, z_value + clear_height_m) for distance, z_value in invert]
+            soffit_pts = self._projectInvert(soffit, mapper)
+            if len(soffit_pts) != len(invert_pts):
+                painter.setPen(edge_pen)
+                painter.drawPolyline(QPolygonF(invert_pts))
+                continue
 
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(fill_color))
             painter.drawPolygon(QPolygonF(invert_pts + list(reversed(soffit_pts))))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(invert_pen)
+            painter.setPen(edge_pen)
             painter.drawPolyline(QPolygonF(invert_pts))
-            painter.setPen(soffit_pen)
             painter.drawPolyline(QPolygonF(soffit_pts))
 
         if plot_area is not None and not plot_area.isEmpty():
@@ -487,47 +510,6 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             if pt is not None:
                 points.append(pt)
         return points
-
-    @staticmethod
-    def _offsetAlongNormal(points, offset_px):
-        """
-        Offset a polyline by ``offset_px`` along its upward normal, so the band
-        keeps a constant visual thickness whatever the slope. Vertex normals are
-        the averaged normals of the adjacent segments (a simple miter).
-        """
-        count = len(points)
-        seg_normals = []
-        for i in range(count - 1):
-            dx = points[i + 1].x() - points[i].x()
-            dy = points[i + 1].y() - points[i].y()
-            length = math.hypot(dx, dy)
-            if length == 0:
-                seg_normals.append((0.0, -1.0))
-                continue
-            nx, ny = -dy / length, dx / length
-            if ny > 0:  # keep the normal pointing up (toward smaller y / soffit)
-                nx, ny = -nx, -ny
-            seg_normals.append((nx, ny))
-
-        result = []
-        for i in range(count):
-            if i == 0:
-                nx, ny = seg_normals[0]
-            elif i == count - 1:
-                nx, ny = seg_normals[-1]
-            else:
-                ax, ay = seg_normals[i - 1]
-                bx, by = seg_normals[i]
-                nx, ny = ax + bx, ay + by
-                length = math.hypot(nx, ny)
-                if length == 0:
-                    nx, ny = seg_normals[i]
-                else:
-                    nx, ny = nx / length, ny / length
-            result.append(
-                QPointF(points[i].x() + nx * offset_px, points[i].y() + ny * offset_px)
-            )
-        return result
 
     def _drawMissingDataX(self, painter, center, x_size=8.0):
         x_pen = QPen(QColor("#FF0000"), 2.5)
@@ -640,6 +622,7 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
         self._manhole_chamber_color = QColor("#FFFFFF")  # Opaque chamber interior
         self._reach_invert_color = QColor("#1A5276")  # Pipe band (matches reach line style)
         self._manhole_default_px_width = MANHOLE_DEFAULT_PX_WIDTH
+        self._vertical_exaggeration = 10.0  # for the on-plot V.E. readout
         self.setMouseTracking(True)
         if hasattr(self, "viewport"):
             try:
@@ -715,3 +698,9 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
     def setReachBands(self, bands):
         if self._manhole_item is not None:
             self._manhole_item.setBands(bands or [])
+
+    def setVerticalExaggeration(self, value):
+        """Store the V.E. factor for the on-plot readout and repaint the overlay."""
+        self._vertical_exaggeration = float(value)
+        if self._manhole_item is not None:
+            self._manhole_item.update()

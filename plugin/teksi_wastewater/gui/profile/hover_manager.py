@@ -34,7 +34,6 @@ from ...utils.twwlayermanager import TwwLayerManager
 from .layer_setup import (
     _feature_attributes,
     _to_float,
-    reach_band_px,
     resolve_value_list,
 )
 
@@ -461,10 +460,19 @@ class ProfileHoverManager:
             invert_pt = self._plotToCanvasPoint(distance, invert_z)
             if invert_pt is None:
                 continue
-            band_px = reach_band_px(band.get("clear_height_mm")) or 2.0
-            # The band is drawn from the invert upward (soffit above = smaller y).
-            top = invert_pt.y() - band_px - margin
-            bottom = invert_pt.y() + margin
+            # The band spans invert → soffit at TRUE elevation (soffit above =
+            # smaller y). Build its on-screen vertical extent from the real
+            # clear height so the gate matches what is drawn.
+            clear_height_mm = band.get("clear_height_mm")
+            soffit_y = invert_pt.y()
+            if clear_height_mm is not None:
+                soffit_pt = self._plotToCanvasPoint(
+                    distance, invert_z + float(clear_height_mm) / 1000.0
+                )
+                if soffit_pt is not None:
+                    soffit_y = soffit_pt.y()
+            top = min(invert_pt.y(), soffit_y) - margin
+            bottom = max(invert_pt.y(), soffit_y) + margin
             if top <= cursor.y() <= bottom:
                 return True
         return False
