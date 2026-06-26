@@ -220,47 +220,117 @@ class TwwElevationProfileWidget(QWidget):
 
     def setProfileFromTree(self, edges):
         """
-        Set the profile curve from tree data (edges).
+        Set the profile curve from an upstream/downstream trace.
 
-        Builds a polyline geometry from the edge list and calls setProfileCurve().
+        The trace (``edges``) is a tree rooted at the clicked node (see
+        TwwGraph.getTree). A length profile is a single 1-D path, so a branching
+        tree cannot be drawn as-is without pipes crossing at junctions. We
+        therefore reduce the tree to its **main trunk**: the path from the root
+        to the farthest node (by cumulative reach length), and render only that.
+        Reaches are oriented to the running path and their shared junction
+        vertices de-duplicated so the curve never zig-zags; the trunk's reach
+        ids and node points are forwarded so only this path is drawn.
 
-        :param edges: List of (from_node, to_node, edge_info) tuples.
+        :param edges: List of (parent_node, child_node, edge_info) tuples, where
+            edge_info carries ``weight`` (length), ``objType`` and
+            ``baseFeature`` (reach obj_id). Edges point away from the root.
         """
         reach_layer = TwwLayerManager.layer("vw_tww_reach")
         if not reach_layer or not edges:
             return
 
+        # --- Reduce the traced tree to its longest root->leaf trunk ----------
+        # Edges point parent->child, away from the root (the clicked node).
+        children = {}
+        parent_of = {}
+        for parent, child, info in edges:
+            children.setdefault(parent, []).append((child, info))
+            parent_of[child] = (parent, info)
+
+        # The root is the only node that is never a child.
+        roots = [p for p in children if p not in parent_of]
+        if not roots:
+            return
+        root = roots[0]
+
+        # Farthest node from the root by cumulative length (tree => a leaf).
+        far_node, far_dist = root, 0.0
+        stack = [(root, 0.0)]
+        while stack:
+            node, dist = stack.pop()
+            if dist > far_dist:
+                far_node, far_dist = node, dist
+            for child, info in children.get(node, []):
+                stack.append((child, dist + (info.get("weight") or 0.0)))
+
+        # Walk root <- ... <- far_node to collect the trunk edges in path order.
+        trunk = []
+        node = far_node
+        while node in parent_of:
+            parent, info = parent_of[node]
+            trunk.append(info)
+            node = parent
+        trunk.reverse()
+
+        # Reach obj_ids along the trunk, in order, de-duplicating a reach that
+        # spans several routing segments (consecutive identical baseFeature).
         reach_ids = []
-        for item in edges:
-            item_info = item[2]
-            if item_info.get("objType") == "reach":
-                base_feature = item_info.get("baseFeature")
-                if base_feature:
+        for info in trunk:
+            if info.get("objType") == "reach":
+                base_feature = info.get("baseFeature")
+                if base_feature and (not reach_ids or reach_ids[-1] != base_feature):
                     reach_ids.append(base_feature)
 
         if not reach_ids:
             return
 
-        reach_list = ",".join("'" + rid + "'" for rid in reach_ids if rid)
+        # --- Build the oriented profile curve from the trunk reaches ---------
+        reach_list = ",".join("'" + rid + "'" for rid in reach_ids)
         request = QgsFeatureRequest()
         request.setFilterExpression(f"obj_id IN ({reach_list})")
-
-        points = []
+        polyline_by_id = {}
         for feature in reach_layer.getFeatures(request):
             geometry = feature.geometry()
-            if geometry:
-                polyline = geometry.asPolyline()
-                if points:
-                    if points[-1] == polyline[0]:
-                        points.extend(polyline[1:])
-                    else:
-                        points.extend(polyline)
-                else:
-                    points.extend(polyline)
+            if geometry is None or geometry.isEmpty():
+                continue
+            polyline = geometry.asPolyline()
+            if polyline:
+                polyline_by_id[feature["obj_id"]] = polyline
 
-        if points:
+        ordered = [list(polyline_by_id[rid]) for rid in reach_ids if rid in polyline_by_id]
+        if not ordered:
+            return
+
+        # Orient the first reach against the second so the chain connects
+        # head-to-tail; the loop then orients each remaining reach to the path.
+        if len(ordered) >= 2:
+            first, nxt = ordered[0], ordered[1]
+            nxt_ends = (nxt[0], nxt[-1])
+            if min(first[0].sqrDist(p) for p in nxt_ends) < min(
+                first[-1].sqrDist(p) for p in nxt_ends
+            ):
+                first.reverse()
+
+        points = []
+        node_points = []
+        for polyline in ordered:
+            if points:
+                tail = points[-1]
+                if tail.sqrDist(polyline[-1]) < tail.sqrDist(polyline[0]):
+                    polyline.reverse()
+            # Reach endpoints are the path's node positions (used to keep only
+            # the structures sitting on this path).
+            node_points.append(polyline[0])
+            node_points.append(polyline[-1])
+            if points and points[-1].sqrDist(polyline[0]) < 1e-6:
+                polyline = polyline[1:]
+            points.extend(polyline)
+
+        if len(points) >= 2:
             profile_geometry = QgsGeometry.fromPolylineXY(points)
-            self.setProfileCurve(profile_geometry)
+            self.setProfileCurve(
+                profile_geometry, reach_ids=reach_ids, node_points=node_points
+            )
 
     # ------------------------------------------------------------------
     # Canvas helpers
