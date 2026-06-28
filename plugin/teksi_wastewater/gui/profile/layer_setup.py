@@ -139,6 +139,11 @@ class ProfileLayerSetup:
                     "marker_outline": "#1A5276",
                     "marker_name": "circle",
                     "hollow": False,
+                    # The node where two reaches meet is already drawn by the
+                    # manhole shaft overlay; a reach vertex marker here just
+                    # collapses onto the invert and reads as a stray data point
+                    # (same reason vw_wastewater_node/vw_cover are not rendered).
+                    "show_markers": False,
                 },
             ),
             # vw_wastewater_node and vw_cover are intentionally NOT rendered: at
@@ -782,13 +787,16 @@ class ProfileLayerSetup:
                         "name": style.get("marker_name", "circle"),
                     }
                 )
+                # IndividualFeatures profiles have no "show markers" toggle (the
+                # QGIS setShow*… methods are surface-plot only), so a reach
+                # endpoint marker can't be switched off by a flag — QGIS draws it
+                # wherever the feature meets the profile. To honour
+                # show_markers=False we make the symbol fully transparent, which
+                # keeps the invert line clean (the node is shown by the shaft
+                # overlay). Point layers keep their visible marker.
+                if not style.get("show_markers", True):
+                    marker_symbol.setOpacity(0.0)
                 elevation_props.setProfileMarkerSymbol(marker_symbol)
-                if hasattr(elevation_props, "setShowMarkers"):
-                    elevation_props.setShowMarkers(True)
-                if hasattr(elevation_props, "setShowMarker"):
-                    elevation_props.setShowMarker(True)
-                if hasattr(elevation_props, "setShowPoints"):
-                    elevation_props.setShowPoints(True)
 
             if hasattr(elevation_props, "setRespectLayerSymbology"):
                 elevation_props.setRespectLayerSymbology(False)
