@@ -61,6 +61,7 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         self._canvas = canvas
         self._dashes = []
         self._bands = []
+        self._change_points = []
         # (dash, QRectF) in canvas pixels for the structures actually drawn this
         # frame — hover hit-tests against these, since the shafts are drawn in
         # exaggerated pixel space, not at their true (collapsed) elevations.
@@ -68,6 +69,8 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         # (dash, QRectF) for just the cover cap band, so hovering the cover can
         # show a dedicated cover tooltip distinct from the whole-manhole one.
         self._cover_hit_rects = []
+        # (change_point, QRectF) for the change-point X marks drawn this frame.
+        self._cp_hit_rects = []
         self._rect = QRectF()
         self.setZValue(90)
         self.updateRect()
@@ -99,6 +102,15 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
     def bands(self):
         return self._bands
 
+    def setChangePoints(self, change_points):
+        self._change_points = change_points or []
+        # Drop stale hit rects immediately, mirroring setDashes.
+        self._cp_hit_rects = []
+        self.update()
+
+    def changePoints(self):
+        return self._change_points
+
     def hitRects(self):
         """(dash, QRectF) pairs for structures drawn this frame, for hover."""
         return self._hit_rects
@@ -106,6 +118,10 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
     def coverHitRects(self):
         """(dash, QRectF) pairs for cover caps drawn this frame, for hover."""
         return self._cover_hit_rects
+
+    def changePointHitRects(self):
+        """(change_point, QRectF) pairs for the X marks drawn this frame, for hover."""
+        return self._cp_hit_rects
 
     def _plotPointToCanvasPoint(self, distance, elevation):
         if not hasattr(self._canvas, "plotPointToCanvasPoint"):
@@ -145,7 +161,9 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         painter.drawLine(QPointF(right, y), QPointF(right, y + 5))
 
     def paint(self, painter, option=None, widget=None):
-        if painter is None or not painter.isActive() or (not self._dashes and not self._bands):
+        if painter is None or not painter.isActive() or (
+            not self._dashes and not self._bands and not self._change_points
+        ):
             return
 
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -158,6 +176,12 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         # hover rects from the previous frame.
         self._hit_rects = []
         self._cover_hit_rects = []
+        self._cp_hit_rects = []
+
+        # Change points sit on the pipe line; draw them after the bands (so the X
+        # is on top) and before the early dash return (so they still show on a
+        # path that has no structures).
+        self._drawChangePoints(painter, plot_area)
 
         if not self._dashes:
             return
@@ -565,6 +589,57 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             )
         return result
 
+    def _drawChangePoints(self, painter, plot_area):
+        """
+        Draw each change point as a map-style black X on the pipe line.
+
+        A change point is a junction node with no structure; vw_change_points
+        renders it on the map as two crossed black lines (±25° from vertical).
+        This reproduces that glyph on the profile, anchored at the change-point
+        level (the pipe invert there) and painted over the band so it stays
+        visible — the native marker collapsed onto the invert and was hidden.
+        Falls back to the linear mapper when the level leaves the visible range.
+        """
+        if not self._change_points:
+            return
+        mapper = self._plotToCanvasMapper()
+        for change_point in self._change_points:
+            distance = change_point.get("distance")
+            level = change_point.get("level")
+            if distance is None or level is None:
+                continue
+            pt = self._plotPointToCanvasPoint(distance, level)
+            if pt is None and mapper is not None:
+                pt = mapper(distance, level)
+            if pt is None:
+                continue
+            if plot_area is not None and not plot_area.contains(pt):
+                continue
+            self._drawChangePointX(painter, pt)
+            self._cp_hit_rects.append(
+                (change_point, QRectF(pt.x() - 9.0, pt.y() - 13.0, 18.0, 26.0))
+            )
+
+    def _drawChangePointX(self, painter, center):
+        """Black narrow X matching the vw_change_points map symbol (two ±25° lines)."""
+        color = getattr(self._canvas, "_change_point_color", QColor("#000000"))
+        pen = QPen(color, 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        half = 11.0
+        angle = math.radians(25.0)
+        dx = half * math.sin(angle)
+        dy = half * math.cos(angle)
+        painter.drawLine(
+            QPointF(center.x() - dx, center.y() - dy),
+            QPointF(center.x() + dx, center.y() + dy),
+        )
+        painter.drawLine(
+            QPointF(center.x() + dx, center.y() - dy),
+            QPointF(center.x() - dx, center.y() + dy),
+        )
+
     def _drawMissingDataX(self, painter, center, x_size=8.0):
         x_pen = QPen(QColor("#FF0000"), 2.5)
         x_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -675,6 +750,7 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
         self._manhole_cover_color = QColor("#2C3E50")  # Dark gray for the cover cap
         self._manhole_chamber_color = QColor("#FFFFFF")  # Opaque chamber interior
         self._reach_invert_color = QColor("#1A5276")  # Pipe band (matches reach line style)
+        self._change_point_color = QColor("#000000")  # Map-style X for change points
         self._manhole_default_px_width = MANHOLE_DEFAULT_PX_WIDTH
         self.setMouseTracking(True)
         if hasattr(self, "viewport"):
@@ -725,6 +801,12 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
             return []
         return self._manhole_item.bands()
 
+    def getChangePointHitRects(self):
+        """(change_point, QRectF) pairs in canvas pixels for the X marks this frame."""
+        if self._manhole_item is None:
+            return []
+        return self._manhole_item.changePointHitRects()
+
     def _onPlotAreaChanged(self):
         if self._manhole_item is not None:
             self._manhole_item.update()
@@ -751,3 +833,7 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
     def setReachBands(self, bands):
         if self._manhole_item is not None:
             self._manhole_item.setBands(bands or [])
+
+    def setChangePoints(self, change_points):
+        if self._manhole_item is not None:
+            self._manhole_item.setChangePoints(change_points or [])

@@ -84,6 +84,8 @@ class ProfileLayerSetup:
         self._structure_cache = []  # Cached ws features for manhole dash building
         self._reach_source = None  # Original vw_tww_reach layer (for re-filtering)
         self._ws_source = None  # Original vw_tww_wastewater_structure layer
+        self._change_point_source = None  # Original vw_change_points layer
+        self._change_point_cache = []  # Cached change points for overlay X marks
 
     # ------------------------------------------------------------------
     # Public API
@@ -95,8 +97,9 @@ class ProfileLayerSetup:
 
         Based on the working configuration tested by the project owner:
         - Use "Capture curve from features" approach
-        - Selected layers: vw_tww_reach, node/cover point layers, vw_change_points
-        - Set all layers to "Absolute" clamping (use Z values from geometry)
+        - Native canvas layer: vw_tww_reach (Absolute clamping, Z from geometry)
+        - Structures and change points are drawn by the overlay, not as native
+          layers (their markers otherwise collapse onto the pipe invert)
 
         Node and cover points are memory layers built from
         vw_tww_wastewater_structure alone: its geometry is the main
@@ -116,6 +119,12 @@ class ProfileLayerSetup:
         self._temp_node_layer, self._temp_cover_layer = self._buildStructurePointLayers(
             self._ws_source
         )
+
+        # Change points (junction nodes with no structure) are drawn by the
+        # overlay, not as a native layer — same collapse-onto-invert reason as
+        # cover/node. Cache them here from vw_change_points (PointZ, Z = level).
+        self._change_point_source = TwwLayerManager.layer("vw_change_points")
+        self._change_point_cache = self._changePointEntries(self._change_point_source, None)
 
         # 2. Define the layers to use (based on working configuration)
         # profile_type: 'surface' = Continuous Surface, 'features' = Individual Features
@@ -146,26 +155,13 @@ class ProfileLayerSetup:
                     "show_markers": False,
                 },
             ),
-            # vw_wastewater_node and vw_cover are intentionally NOT rendered: at
-            # network-overview zoom their markers collapse onto the pipe invert
-            # (co_level, wn_bottom_level and rp level are all within sub-pixel),
-            # which contradicts the exaggerated shaft. The manhole is now drawn
-            # entirely by the overlay shaft — floor edge = wn_bottom_level, cover
-            # line = co_level — anchored at the true pipe invert (rp level).
-            (
-                "vw_change_points",
-                "Change points",
-                "features",
-                {
-                    "line": "#E74C3C",
-                    "line_width": 1.5,
-                    "fill": "#E74C3C20",
-                    "marker": "#E74C3C",
-                    "marker_size": 8,
-                    "marker_outline": "#C0392B",
-                    "marker_name": "diamond",
-                },
-            ),
+            # vw_wastewater_node, vw_cover and vw_change_points are intentionally
+            # NOT rendered as native layers: at network-overview zoom their markers
+            # collapse onto the pipe invert (co_level, wn_bottom_level, the change-
+            # point level and rp level are all within sub-pixel), where the overlay
+            # pipe band then paints over them. The manhole is drawn by the overlay
+            # shaft; the change point is drawn by the overlay as a map-style X
+            # (see buildChangePointMarkers / ManholeDashPlotItem._drawChangePointX).
         ]
 
         layers_to_add = []
@@ -303,6 +299,11 @@ class ProfileLayerSetup:
             self._refillLayer(self._temp_cover_layer, cover_features)
             self._structure_cache = structure_cache
 
+        if self._change_point_source is not None:
+            self._change_point_cache = self._changePointEntries(
+                self._change_point_source, node_points
+            )
+
     @staticmethod
     def _refillLayer(layer, features):
         """Replace all features of a memory layer in place."""
@@ -424,6 +425,59 @@ class ProfileLayerSetup:
             best_z = z_value
 
         return best_z
+
+    def buildChangePointMarkers(self, profile_curve_geom, tolerance):
+        """
+        Build change-point marker data along the profile curve.
+
+        Projects each cached change point onto the curve (lineLocatePoint); the
+        X is anchored at the change-point level (= the pipe invert there), with
+        the nearest reach-vertex Z as a fallback when the change point has no
+        usable Z. Skipped when nothing can anchor it, never guessed.
+
+        :param profile_curve_geom: QgsGeometry of the profile path.
+        :param tolerance: Max distance from the curve in map units.
+        :return: List of marker dicts for ManholeDashPlotItem.
+        """
+        if (
+            profile_curve_geom is None
+            or profile_curve_geom.isEmpty()
+            or not self._change_point_cache
+        ):
+            return []
+
+        markers = []
+        for entry in self._change_point_cache:
+            geometry = entry["geometry"]
+            try:
+                distance_along = profile_curve_geom.lineLocatePoint(geometry)
+            except Exception:
+                continue
+            if distance_along is None or distance_along < 0:
+                continue
+            try:
+                if profile_curve_geom.distance(geometry) > tolerance:
+                    continue
+            except Exception:
+                pass
+
+            level = entry.get("level")
+            if level is None:
+                level = self._adjacentReachLevel(geometry)
+            if level is None:
+                continue
+
+            markers.append(
+                {
+                    "distance": float(distance_along),
+                    "level": float(level),
+                    "obj_id": entry.get("obj_id"),
+                    "change_in_material": entry.get("change_in_material"),
+                    "change_in_clear_height": entry.get("change_in_clear_height"),
+                    "change_in_slope": entry.get("change_in_slope"),
+                }
+            )
+        return markers
 
     def buildReachBands(self, profile_curve_geom, tolerance):
         """
@@ -716,6 +770,52 @@ class ProfileLayerSetup:
             )
 
         return node_features, cover_features, structure_cache
+
+    def _changePointEntries(self, cp_layer, node_points=None):
+        """
+        Read vw_change_points into overlay-ready entries.
+
+        A change point is a junction node where reaches meet without a structure.
+        Its geometry is a PointZ whose Z is the node level (the pipe invert at
+        that node). When ``node_points`` is given, only change points sitting on
+        a selected path node are kept — the same path filter as structures.
+        """
+        if cp_layer is None:
+            return []
+
+        path_points = list(node_points) if node_points is not None else None
+        entries = []
+        for feat in cp_layer.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            try:
+                point = geom.asPoint()
+            except Exception:
+                continue
+            if path_points is not None and not _point_on_path(point, path_points):
+                continue
+
+            level = None
+            try:
+                z_value = geom.vertexAt(0).z()
+                if z_value is not None and not math.isnan(z_value):
+                    level = float(z_value)
+            except Exception:
+                level = None
+
+            attrs = _feature_attributes(feat)
+            entries.append(
+                {
+                    "geometry": geom,
+                    "obj_id": attrs.get("obj_id"),
+                    "level": level,
+                    "change_in_material": attrs.get("change_in_material"),
+                    "change_in_clear_height": attrs.get("change_in_clear_height"),
+                    "change_in_slope": attrs.get("change_in_slope"),
+                }
+            )
+        return entries
 
     def _configureLayerSymbols(self, elevation_props, style, layer_name):
         """

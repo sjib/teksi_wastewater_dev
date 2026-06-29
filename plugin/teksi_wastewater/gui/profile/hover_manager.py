@@ -89,6 +89,12 @@ class ProfileHoverManager:
     MANHOLE_OUTPUT_LABEL = "_output_label"
     MANHOLE_DIMENSION1 = "ma_dimension1"
 
+    # Canonical vw_change_points fields for the change-point tooltip.
+    CHANGE_POINT_OBJ_ID = "obj_id"
+    CHANGE_POINT_MATERIAL = "change_in_material"
+    CHANGE_POINT_CLEAR_HEIGHT = "change_in_clear_height"
+    CHANGE_POINT_SLOPE = "change_in_slope"
+
     def __init__(self, canvas, map_canvas):
         """
         :param canvas: TwwElevationProfileCanvas instance.
@@ -208,6 +214,16 @@ class ProfileHoverManager:
             structure_point = structure_match.get("plot_point")
             self._showHoverTooltip(structure_point, structure_match)
             self._highlightMatchOnMap(structure_point, structure_match)
+            return
+
+        # Change-point X marks also sit on the pipe line; check them before the
+        # reach so hovering the X wins over the pipe beneath it.
+        change_point_match = self._identifyChangePoint(plot_point)
+        if change_point_match is not None:
+            self._last_hover_match = change_point_match
+            change_point = change_point_match.get("plot_point")
+            self._showHoverTooltip(change_point, change_point_match)
+            self._highlightMatchOnMap(change_point, change_point_match)
             return
 
         # No structure under the cursor → reach/surface hover, which is only
@@ -420,6 +436,40 @@ class ProfileHoverManager:
                 },
                 "distance": dash_distance,
                 "elevation": cover_level,
+            },
+            "plot_point": result_point,
+            "distance2": 0.0,
+        }
+
+    def _identifyChangePoint(self, plot_point):
+        """Identify the change-point X under the cursor → a change-point tooltip."""
+        if not hasattr(self._canvas, "getChangePointHitRects"):
+            return None
+        change_point = self._nearestDashInRects(
+            self._canvas.getChangePointHitRects(), plot_point, tolerance=6.0
+        )
+        if change_point is None:
+            return None
+
+        distance = change_point.get("distance")
+        level = change_point.get("level")
+        result_point = plot_point
+        if distance is not None and level is not None:
+            result_point = QPointF(distance, level)
+
+        return {
+            "layer": None,
+            "result": {
+                "feature": None,
+                "attributes": {
+                    "obj_id": change_point.get("obj_id"),
+                    "change_in_material": change_point.get("change_in_material"),
+                    "change_in_clear_height": change_point.get("change_in_clear_height"),
+                    "change_in_slope": change_point.get("change_in_slope"),
+                    "_is_change_point": True,
+                },
+                "distance": distance,
+                "elevation": level,
             },
             "plot_point": result_point,
             "distance2": 0.0,
@@ -659,6 +709,7 @@ class ProfileHoverManager:
         is_reach = self._isReachHover(layer_name, attrs)
         is_cover = self._isCoverHover(layer_name, attrs)
         is_manhole = self._isManholeHover(layer_name, attrs)
+        is_change_point = self._isChangePointHover(layer_name, attrs)
 
         if is_reach:
             obj_id = attrs.get(self.REACH_OBJ_ID)
@@ -782,11 +833,39 @@ class ProfileHoverManager:
                     lines.append(f"Level: {self.MISSING_DATA_HTML}")
                 else:
                     lines.append(f"Level: {bottom_level:.2f} m")
+
+        elif is_change_point:
+            obj_id = attrs.get(self.CHANGE_POINT_OBJ_ID)
+            lines.append(f"Change point {obj_id}" if obj_id else "Change point")
+
+            if plot_point is not None:
+                lines.append(f"Level: {plot_point.y():.2f} m")
+
+            lines.append(
+                f"Material change: {self._formatYesNo(attrs.get(self.CHANGE_POINT_MATERIAL))}"
+            )
+            lines.append(
+                "Clear-height change: "
+                f"{self._formatYesNo(attrs.get(self.CHANGE_POINT_CLEAR_HEIGHT))}"
+            )
+            slope_change = _to_float(attrs.get(self.CHANGE_POINT_SLOPE))
+            if slope_change is None:
+                lines.append("Slope change: No")
+            elif slope_change == 0:
+                lines.append("Slope change: No")
+            else:
+                lines.append(f"Slope change: {slope_change:.0f} ‰")
         else:
             if layer_name:
                 lines.append(layer_name)
 
-        if plot_point is not None and not is_reach and not is_cover and not is_manhole:
+        if (
+            plot_point is not None
+            and not is_reach
+            and not is_cover
+            and not is_manhole
+            and not is_change_point
+        ):
             lines.append(f"distance: {plot_point.x():.2f}")
             lines.append(f"elevation: {plot_point.y():.2f}")
 
@@ -831,6 +910,11 @@ class ProfileHoverManager:
             return False
         return str(attrs.get(self.MANHOLE_WS_TYPE) or "").lower() == "manhole"
 
+    def _isChangePointHover(self, layer_name, attrs):
+        if attrs and attrs.get("_is_change_point"):
+            return True
+        return "change_point" in (layer_name or "").lower()
+
     # ------------------------------------------------------------------
     # Map highlight
     # ------------------------------------------------------------------
@@ -851,6 +935,7 @@ class ProfileHoverManager:
         is_reach = self._isReachHover(layer_name, attrs)
         is_cover = self._isCoverHover(layer_name, attrs)
         is_manhole = self._isManholeHover(layer_name, attrs)
+        is_change_point = self._isChangePointHover(layer_name, attrs)
 
         if is_reach:
             obj_id = attrs.get(self.REACH_OBJ_ID)
@@ -886,6 +971,17 @@ class ProfileHoverManager:
                 "vw_cover",
                 f'"fk_wastewater_structure" = \'{ws_id}\'',
                 highlight_key,
+            )
+        elif is_change_point:
+            cp_id = attrs.get(self.CHANGE_POINT_OBJ_ID)
+            if not cp_id:
+                self._clearHighlight()
+                return
+            highlight_key = f"change_point:{cp_id}"
+            if highlight_key == self._current_highlight_key:
+                return
+            self._doHighlightFeature(
+                "vw_change_points", f'"obj_id" = \'{cp_id}\'', highlight_key
             )
         else:
             self._clearHighlight()
@@ -992,6 +1088,13 @@ class ProfileHoverManager:
                 distance = result.get("distance")
                 if distance is not None:
                     return ("dash", distance)
+            if attrs.get("_is_change_point"):
+                obj_id = attrs.get("obj_id")
+                if obj_id:
+                    return ("change_point", obj_id)
+                distance = result.get("distance")
+                if distance is not None:
+                    return ("change_point", distance)
 
         return None
 
@@ -1104,3 +1207,17 @@ class ProfileHoverManager:
             return f"{float(value):.{decimals}f} m"
         except (TypeError, ValueError):
             return str(value)
+
+    @staticmethod
+    def _formatYesNo(value):
+        """Render a vw_change_points boolean flag as Yes / No (? when unknown)."""
+        if value is None:
+            return "?"
+        if isinstance(value, str):
+            token = value.strip().lower()
+            if token in ("true", "t", "1", "yes"):
+                return "Yes"
+            if token in ("false", "f", "0", "no", ""):
+                return "No"
+            return value
+        return "Yes" if value else "No"
