@@ -252,11 +252,13 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
             features = tww_wastewater_structures_layer.getFeatures(request)
             tww_wastewater_structures_layer.select([f.id() for f in features])
 
-    def setTree(self, nodes, edges):
+    def setTree(self, nodes, edges, render=True):
         self.nodes = nodes
         self.edges = edges
         self.selectCurrentPathAction.setEnabled(self.nodes is not None)
-        
-        # Update profile widget if it supports setProfileFromTree
-        if self.plotWidget and hasattr(self.plotWidget, 'setProfileFromTree'):
+
+        # Update profile widget if it supports setProfileFromTree.
+        # render=False is used when merely restoring state on dock (re)open, so
+        # a previous trace is not silently redrawn onto the fresh canvas.
+        if render and self.plotWidget and hasattr(self.plotWidget, 'setProfileFromTree'):
             self.plotWidget.setProfileFromTree(edges)

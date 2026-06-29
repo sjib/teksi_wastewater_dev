@@ -566,7 +566,10 @@ class TeksiWastewaterPlugin:
 
             self.plotWidget = TwwElevationProfileWidget(self.profile_dock)
             self.profile_dock.addPlotWidget(self.plotWidget)
-            self.profile_dock.setTree(self.nodes, self.edges)
+            # Restore the last trace's state (enables "Select current path") but
+            # do NOT redraw it: reopening the dock should start with an empty
+            # canvas, not silently re-render the previous selection.
+            self.profile_dock.setTree(self.nodes, self.edges, render=False)
 
     def onDockClosed(self):  # used when Dock dialog is closed
         """
