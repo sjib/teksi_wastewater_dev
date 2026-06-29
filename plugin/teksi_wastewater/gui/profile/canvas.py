@@ -259,7 +259,19 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                 if invert_level is not None:
                     invert_pt = anchor_pt
                     anchor_x = invert_pt.x()
-                    top_y = invert_pt.y() - manhole_cover_offset_px(cover_level - invert_level)
+                    # Shaft top = the higher (smaller screen-y) of the exaggerated
+                    # cap and the TRUE cover level. A shallow manhole's true cover
+                    # is sub-pixel, so the exaggeration wins and nothing changes;
+                    # a deep drop shaft (e.g. a 56m vortex_manhole) has its true
+                    # cover far higher, so the shaft reaches its real cover and the
+                    # inflow pipe lands on the wall instead of dangling mid-air.
+                    top_y_exag = invert_pt.y() - manhole_cover_offset_px(cover_level - invert_level)
+                    cover_true_pt = self._projectPoint(distance, cover_level, mapper)
+                    top_y = (
+                        min(top_y_exag, cover_true_pt.y())
+                        if cover_true_pt is not None
+                        else top_y_exag
+                    )
                     floor_y = invert_pt.y() + manhole_sump_offset_px(invert_level - bottom_level)
                 else:
                     # No pipe invert nearby: fall back to a single exaggerated
