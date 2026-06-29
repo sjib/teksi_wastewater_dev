@@ -121,6 +121,19 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
             return None
         return QPointF(canvas_point.x(), canvas_point.y())
 
+    def _projectPoint(self, distance, elevation, mapper):
+        """
+        Project (distance, elevation) to canvas px, falling back to ``mapper``
+        when plotPointToCanvasPoint returns nothing because the point is outside
+        the visible range. Keeps manhole anchors placeable when their true
+        cover/bottom level is scrolled off the vertical view (mirrors the
+        fallback _projectInvert already uses for reach bands).
+        """
+        pt = self._plotPointToCanvasPoint(distance, elevation)
+        if pt is None and mapper is not None:
+            pt = mapper(distance, elevation)
+        return pt
+
     def _drawCoverCap(self, painter, cover_pt, half_width, cover_pen):
         """Cover drawn as a bold line with short side brackets (a '⊓' cap)."""
         painter.setPen(cover_pen)
@@ -148,6 +161,12 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
 
         if not self._dashes:
             return
+
+        # Linear (distance, elevation) → px mapper, used as a fallback when
+        # plotPointToCanvasPoint returns nothing for points outside the visible
+        # range, so a manhole stays drawn when its true cover/bottom level is
+        # scrolled off the vertical view as you zoom in (see _projectPoint).
+        mapper = self._plotToCanvasMapper()
 
         manhole_color = getattr(self._canvas, "_manhole_shaft_color", QColor("#6E4C1E"))
         structure_color = getattr(self._canvas, "_structure_shaft_color", QColor("#0E6655"))
@@ -204,17 +223,32 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
 
             anchor_cover, anchor_bottom = _resolve_manhole_anchors(cover_level, bottom_level)
 
-            cover_pt = self._plotPointToCanvasPoint(distance, anchor_cover)
-            bottom_pt = self._plotPointToCanvasPoint(distance, anchor_bottom)
+            # Project with the mapper fallback: when zoomed in, a manhole's true
+            # cover/bottom level can leave the vertical view, and
+            # plotPointToCanvasPoint then returns nothing. The old None guard
+            # dropped the whole structure even though its pipe invert is still on
+            # screen — that is why the manhole vanished as you zoomed in.
+            cover_pt = self._projectPoint(distance, anchor_cover, mapper)
+            bottom_pt = self._projectPoint(distance, anchor_bottom, mapper)
             if cover_pt is None or bottom_pt is None:
                 continue
 
-            if plot_area is not None:
-                if not plot_area.contains(cover_pt) and not plot_area.contains(bottom_pt):
-                    continue
+            # The shaft is drawn in exaggerated pixel space around the pipe invert
+            # (or the bottom, when no reach is near), so visibility tracks that
+            # anchor — not the off-range true cover/bottom. Skip only when the
+            # anchor itself leaves the plot, so a zoomed-in manhole stays drawn.
+            invert_level = dash.get("invert_level")
+            anchor_pt = (
+                self._projectPoint(distance, invert_level, mapper)
+                if invert_level is not None
+                else bottom_pt
+            )
+            if anchor_pt is None:
+                continue
+            if plot_area is not None and not plot_area.contains(anchor_pt):
+                continue
 
             half_width = shaft_width_px / 2.0
-            invert_level = dash.get("invert_level")
 
             if not cover_missing and not bottom_missing:
                 # Build the chamber around the pipe invert (rp level), the true
@@ -223,9 +257,7 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                 # offset below it. All offsets are pixels because the real
                 # metre gaps are sub-pixel at overview zoom; their ratio is kept.
                 if invert_level is not None:
-                    invert_pt = self._plotPointToCanvasPoint(distance, invert_level)
-                    if invert_pt is None:
-                        continue
+                    invert_pt = anchor_pt
                     anchor_x = invert_pt.x()
                     top_y = invert_pt.y() - manhole_cover_offset_px(cover_level - invert_level)
                     floor_y = invert_pt.y() + manhole_sump_offset_px(invert_level - bottom_level)
@@ -292,11 +324,7 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                 # manhole — chamber from the exaggerated cover down to the invert —
                 # and mark the missing floor with an X below, so it stays
                 # consistent with neighbours instead of collapsing onto the band.
-                invert_pt = (
-                    self._plotPointToCanvasPoint(distance, invert_level)
-                    if invert_level is not None
-                    else None
-                )
+                invert_pt = anchor_pt if invert_level is not None else None
                 if invert_pt is not None:
                     anchor_x = invert_pt.x()
                     top_y = invert_pt.y() - manhole_cover_offset_px(cover_level - invert_level)
@@ -342,11 +370,7 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                 # Bottom known, cover missing. Anchor at the pipe invert — chamber
                 # from the invert down to the exaggerated floor — and mark the
                 # missing cover with an X above.
-                invert_pt = (
-                    self._plotPointToCanvasPoint(distance, invert_level)
-                    if invert_level is not None
-                    else None
-                )
+                invert_pt = anchor_pt if invert_level is not None else None
                 if invert_pt is not None:
                     anchor_x = invert_pt.x()
                     top_y = invert_pt.y()
