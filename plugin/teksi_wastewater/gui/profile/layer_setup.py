@@ -135,13 +135,19 @@ class ProfileLayerSetup:
                 "Reach/Pipe segments",
                 "features",
                 {
-                    # Simple hairline (NOT the old hollow/outlined tube, whose
-                    # dark outlines made the band's bottom edge look heavy). Kept
-                    # only for identify/hover; the visible pipe is the exaggerated
-                    # band drawn by ManholeDashPlotItem on top, whose 1.2px bottom
-                    # edge covers this line so both band edges read the same.
+                    # The visible pipe is the exaggerated band drawn by
+                    # ManholeDashPlotItem; the native QGIS reach line is NOT drawn
+                    # (hide_profile_line sets its symbol opacity to 0). QGIS's own
+                    # tolerance projection draws a spurious zig-zag/spike at reach
+                    # junctions — empirically confirmed 2026-06-30 by recolouring
+                    # this line magenta: the magenta spike appeared while the band
+                    # (which projects cleanly via lineLocatePoint) did not. The
+                    # layer still stays on the canvas so identify and Y-axis auto-
+                    # ranging keep working. Colour/width are irrelevant while
+                    # hidden but kept sane in case the flag is ever removed.
                     "line": "#1A5276",
                     "line_width": 0.3,
+                    "hide_profile_line": True,
                     "fill": "#1A527620",
                     "marker": "#5DADE2",
                     "marker_size": 4,
@@ -865,6 +871,11 @@ class ProfileLayerSetup:
                             "joinstyle": "round",
                         }
                     )
+                # Suppress the native profile line (keep the layer for identify /
+                # Y-axis range) — QGIS's tolerance projection draws a spurious
+                # zig-zag at junctions; the overlay band is the visible pipe.
+                if style.get("hide_profile_line", False):
+                    line_symbol.setOpacity(0.0)
                 elevation_props.setProfileLineSymbol(line_symbol)
 
             if hasattr(elevation_props, "setProfileFillSymbol"):
