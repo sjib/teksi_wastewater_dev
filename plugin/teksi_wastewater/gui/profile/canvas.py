@@ -124,18 +124,7 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         return self._cp_hit_rects
 
     def _plotPointToCanvasPoint(self, distance, elevation):
-        if not hasattr(self._canvas, "plotPointToCanvasPoint"):
-            return None
-        profile_point = QgsProfilePoint(float(distance), float(elevation))
-        try:
-            canvas_point = self._canvas.plotPointToCanvasPoint(profile_point)
-        except (TypeError, ValueError):
-            return None
-        if canvas_point is None:
-            return None
-        if hasattr(canvas_point, "isEmpty") and canvas_point.isEmpty():
-            return None
-        return QPointF(canvas_point.x(), canvas_point.y())
+        return self._canvas.plotPointToCanvasPointSafe(distance, elevation)
 
     def _projectPoint(self, distance, elevation, mapper):
         """
@@ -769,6 +758,27 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
         self._manhole_item = ManholeDashPlotItem(self)
         if hasattr(self, "plotAreaChanged"):
             self.plotAreaChanged.connect(self._onPlotAreaChanged)
+
+    def plotPointToCanvasPointSafe(self, distance, elevation):
+        """
+        Convert a (distance, elevation) profile point to a canvas QPointF, or
+        None when it can't be placed (point outside the visible range, or the
+        API is absent). Single home for the conversion, shared by the
+        ManholeDashPlotItem overlay and the hover manager.
+        """
+        if not hasattr(self, "plotPointToCanvasPoint"):
+            return None
+        try:
+            canvas_point = self.plotPointToCanvasPoint(
+                QgsProfilePoint(float(distance), float(elevation))
+            )
+        except (TypeError, ValueError):
+            return None
+        if canvas_point is None or (
+            hasattr(canvas_point, "isEmpty") and canvas_point.isEmpty()
+        ):
+            return None
+        return QPointF(canvas_point.x(), canvas_point.y())
 
     def setHoverHandlers(self, move_handler, leave_handler):
         """Wire hover/leave handlers after ProfileHoverManager is created."""

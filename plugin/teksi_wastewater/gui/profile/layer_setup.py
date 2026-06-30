@@ -938,20 +938,6 @@ def _feature_attributes(feature):
         return {}
 
 
-def _pick_attr(attrs, keys):
-    """Look up a value by trying multiple candidate keys (case-insensitive fallback)."""
-    if not attrs:
-        return None
-    for key in keys:
-        if key in attrs:
-            return attrs.get(key)
-    lower_map = {str(k).lower(): v for k, v in attrs.items()}
-    for key in keys:
-        if key.lower() in lower_map:
-            return lower_map[key.lower()]
-    return None
-
-
 def _point_on_path(point, path_points, max_sqr_dist=0.01):
     """
     True if ``point`` coincides with one of the selected path's node points.

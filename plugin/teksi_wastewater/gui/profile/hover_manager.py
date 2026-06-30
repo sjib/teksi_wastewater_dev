@@ -508,7 +508,7 @@ class ProfileHoverManager:
             invert_z = self._interpolateInvertZ(invert, distance)
             if invert_z is None:
                 continue
-            invert_pt = self._plotToCanvasPoint(distance, invert_z)
+            invert_pt = self._canvas.plotPointToCanvasPointSafe(distance, invert_z)
             if invert_pt is None:
                 continue
             band_px = reach_band_px(band.get("clear_height_mm")) or 2.0
@@ -535,22 +535,6 @@ class ProfileHoverManager:
                 ratio = (distance - d0) / (d1 - d0)
                 return z0 + (z1 - z0) * ratio
         return None
-
-    def _plotToCanvasPoint(self, distance, elevation):
-        """Convert a (distance, elevation) plot point to canvas pixels, or None."""
-        if not hasattr(self._canvas, "plotPointToCanvasPoint"):
-            return None
-        try:
-            converted = self._canvas.plotPointToCanvasPoint(
-                QgsProfilePoint(float(distance), float(elevation))
-            )
-        except (TypeError, ValueError):
-            return None
-        if converted is None or (
-            hasattr(converted, "isEmpty") and converted.isEmpty()
-        ):
-            return None
-        return QPointF(converted.x(), converted.y())
 
     def _nearestIdentifyResult(self, identify_results, plot_point):
         """Pick the nearest identify result to a plot point."""
