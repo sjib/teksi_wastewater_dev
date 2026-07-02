@@ -79,6 +79,7 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
 
         self.clearCanvasButton.clicked.connect(self.onClearCanvasClicked)
         self.printButton.clicked.connect(self.onPrintButtonClicked)
+        self.exportImageButton.clicked.connect(self.onExportImageButtonClicked)
 
         self.mSliderVerticalExaggeration.valueChanged.connect(self.onVerticalExaggerationChanged)
 
@@ -134,6 +135,18 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
             return
 
         self.plotWidget.printProfile()
+
+    @pyqtSlot()
+    def onExportImageButtonClicked(self):
+        if not self.plotWidget:
+            QMessageBox.information(
+                self,
+                self.tr("Export function not available"),
+                self.tr("No profile is currently displayed."),
+            )
+            return
+
+        self.plotWidget.exportProfileImage()
 
     @pyqtSlot()
     def onConfigureSelectAction(self):

@@ -22,9 +22,12 @@
 #
 # ---------------------------------------------------------------------
 
+from datetime import date
+
 from qgis.core import QgsFeatureRequest, QgsGeometry, QgsLineString
-from qgis.PyQt.QtCore import QTimer
-from qgis.PyQt.QtWidgets import QVBoxLayout, QWidget
+from qgis.PyQt.QtCore import QRectF, QTimer
+from qgis.PyQt.QtGui import QFont, QPageLayout, QPageSize, QPainter
+from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox, QVBoxLayout, QWidget
 
 from ...utils.twwlayermanager import TwwLayerManager
 from .canvas import TwwElevationProfileCanvas
@@ -115,11 +118,143 @@ class TwwElevationProfileWidget(QWidget):
 
     def printProfile(self):
         """
-        Print the profile to PDF.
+        Print the current profile via a system print-preview dialog.
 
-        TODO: Implement — render the canvas to an image/PDF.
+        The canvas is grabbed as an image and scaled onto an A4 landscape
+        page: the manhole shafts, pipe bands and missing-data marks are
+        custom scene items, so a canvas grab is the only rendering path that
+        includes them (a layout-item / vector export would drop them all).
+        A PDF file can be produced by picking a PDF printer in the preview.
         """
-        pass
+        pixmap = self._grabProfilePixmap(self.tr("Print profile"))
+        if pixmap is None:
+            return
+
+        # QtPrintSupport can be missing from stripped-down builds; degrade
+        # with a message instead of crashing (defensive-style, see CLAUDE.md).
+        try:
+            from qgis.PyQt.QtPrintSupport import QPrinter, QPrintPreviewDialog
+        except ImportError:
+            QMessageBox.warning(
+                self,
+                self.tr("Print profile"),
+                self.tr("Qt print support is not available in this QGIS build."),
+            )
+            return
+
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        # Qt6 removed QPrinter.setPaperSize()/setOrientation(); QPageSize and
+        # QPageLayout work on Qt5 and Qt6 alike (fully-scoped enum access
+        # resolves under both PyQt5 and PyQt6).
+        printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+
+        dialog = QPrintPreviewDialog(printer, self)
+        dialog.paintRequested.connect(
+            lambda p, pm=pixmap: self._paintProfilePage(p, pm)
+        )
+        dialog.exec()
+
+    def exportProfileImage(self):
+        """
+        Export the current profile canvas as an image file (PNG/JPEG).
+
+        Same rendering path as printProfile — a canvas grab is the only way
+        to include the custom overlay items. The image is written at the
+        grabbed resolution (device-pixel-ratio aware, so 2x on HiDPI).
+        """
+        pixmap = self._grabProfilePixmap(self.tr("Export profile image"))
+        if pixmap is None:
+            return
+
+        default_name = f"tww_profile_{date.today().isoformat()}.png"
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            self.tr("Export profile image"),
+            default_name,
+            self.tr("PNG image (*.png);;JPEG image (*.jpg)"),
+        )
+        if not path:
+            return
+        # No extension typed: derive it from the chosen filter (pixmap.save
+        # picks the format from the suffix).
+        if "." not in path.split("/")[-1].split("\\")[-1]:
+            path += ".jpg" if "*.jpg" in selected_filter else ".png"
+
+        if not pixmap.save(path):
+            QMessageBox.warning(
+                self,
+                self.tr("Export profile image"),
+                self.tr("Could not write the image to:") + f"\n{path}",
+            )
+
+    def _grabProfilePixmap(self, dialog_title):
+        """
+        Guard + hover cleanup + canvas grab shared by print and image export.
+        Returns the grabbed QPixmap, or None (after informing the user) when
+        there is no profile to render.
+        """
+        if self._profile_curve_geom is None:
+            QMessageBox.information(
+                self,
+                dialog_title,
+                self.tr("No profile is currently displayed."),
+            )
+            return None
+        # Drop hover artefacts (map highlight, QGIS's own hover cross hairs)
+        # so they don't end up in the grabbed image.
+        self._hover_manager.clearState()
+        pixmap = self.canvas.grab()
+        return None if pixmap.isNull() else pixmap
+
+    def _paintProfilePage(self, printer, pixmap):
+        """
+        Paint the grabbed profile pixmap onto one printer page.
+
+        Called from QPrintPreviewDialog.paintRequested — possibly several
+        times (preview refreshes, then the real print run, each with its own
+        resolution), so the page geometry is recomputed on every call.
+        """
+        from qgis.PyQt.QtPrintSupport import QPrinter
+
+        painter = QPainter(printer)
+        try:
+            page = printer.pageRect(QPrinter.Unit.DevicePixel)
+            # QPainter on a QPrinter has its origin at the printable area's
+            # top-left, so only the page SIZE matters here.
+            page_w, page_h = page.width(), page.height()
+
+            # Header line; point-based font sizes are device-independent.
+            font = QFont(self.font())
+            font.setPointSize(10)
+            painter.setFont(font)
+            header = self.tr("TEKSI wastewater — length profile") + f"  ({date.today().isoformat()})"
+            metrics = painter.fontMetrics()
+            painter.drawText(QRectF(0, 0, page_w, metrics.height() * 1.5), header)
+            header_h = metrics.height() * 2.0
+
+            # Fit the pixmap into the remaining page, centred, aspect kept
+            # (the device-pixel-ratio cancels out of the aspect ratio).
+            avail_w = page_w
+            avail_h = page_h - header_h
+            if avail_w <= 0 or avail_h <= 0 or pixmap.height() == 0:
+                return
+            ratio = pixmap.width() / pixmap.height()
+            if avail_w / avail_h > ratio:
+                target_h = avail_h
+                target_w = avail_h * ratio
+            else:
+                target_w = avail_w
+                target_h = avail_w / ratio
+            target = QRectF(
+                (avail_w - target_w) / 2.0,
+                header_h + (avail_h - target_h) / 2.0,
+                target_w,
+                target_h,
+            )
+            painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
+        finally:
+            painter.end()
 
     def clearProfile(self):
         """
