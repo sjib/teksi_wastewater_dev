@@ -66,6 +66,21 @@ class TwwElevationProfileWidget(QWidget):
         self._profile_curve_geom = None
         self._manhole_dash_tolerance = 10.0
 
+        # Initial padded zoom is applied when the async profile generation
+        # finishes (see _onActiveJobCountChanged), not on a 0ms timer: the
+        # canvas auto-zoomFulls when the job completes (because of
+        # invalidateCurrentPlotExtent), which would overwrite any visible
+        # range set earlier.
+        self._initial_zoom_pending = False
+        self._initial_zoom_retries = 0
+        self._job_signal_connected = False
+        if hasattr(self.canvas, "activeJobCountChanged"):
+            try:
+                self.canvas.activeJobCountChanged.connect(self._onActiveJobCountChanged)
+                self._job_signal_connected = True
+            except Exception:
+                pass
+
         # Layer setup helper (owns temp memory layers)
         self._layer_setup = ProfileLayerSetup(self.canvas)
 
@@ -198,32 +213,12 @@ class TwwElevationProfileWidget(QWidget):
             )
         )
 
-        def delayedZoomFull():
-            if hasattr(self.canvas, "zoomFull"):
-                try:
-                    self.canvas.zoomFull()
-                    if (
-                        hasattr(self.canvas, "visibleDistanceRange")
-                        and hasattr(self.canvas, "visibleElevationRange")
-                        and hasattr(self.canvas, "setVisiblePlotRange")
-                    ):
-                        dist_range = self.canvas.visibleDistanceRange()
-                        elev_range = self.canvas.visibleElevationRange()
-                        dist_len = dist_range.upper() - dist_range.lower()
-                        elev_len = elev_range.upper() - elev_range.lower()
-                        margin_dist = max(dist_len * 0.05, 1.0)
-                        margin_elev = max(elev_len * 0.05, 0.5)
-                        d_min = dist_range.lower() - margin_dist
-                        d_max = dist_range.upper() + margin_dist
-                        e_min = elev_range.lower() - margin_elev
-                        e_max = elev_range.upper() + margin_elev
-                        self.canvas.setVisiblePlotRange(d_min, d_max, e_min, e_max)
-                        self.canvas.refresh()
-                except Exception:
-                    pass
-
-        # Delay to allow canvas to finish processing current event
-        QTimer.singleShot(0, delayedZoomFull)
+        # Apply the padded zoom once the async profile generation is done; the
+        # 0ms fallback (no job signal on this QGIS) keeps the old behaviour.
+        self._initial_zoom_pending = True
+        self._initial_zoom_retries = 0
+        if not self._job_signal_connected:
+            QTimer.singleShot(0, self._applyPaddedZoomFull)
 
     def setProfileFromTree(self, edges):
         """
@@ -342,6 +337,94 @@ class TwwElevationProfileWidget(QWidget):
     # ------------------------------------------------------------------
     # Canvas helpers
     # ------------------------------------------------------------------
+
+    def _onActiveJobCountChanged(self, count):
+        if count == 0 and self._initial_zoom_pending:
+            self._initial_zoom_pending = False
+            # Defer one event-loop turn so this runs AFTER the canvas's own
+            # job-finished handling — invalidateCurrentPlotExtent makes it
+            # auto-zoomFull there, which would overwrite our padded range.
+            QTimer.singleShot(0, self._applyPaddedZoomFull)
+
+    def _applyPaddedZoomFull(self):
+        """
+        zoomFull, then widen the visible range so the manhole overlay fits.
+
+        zoomFull only knows the layer features (true levels), but the manhole
+        overlay draws in exaggerated pixel space around each pipe invert —
+        without extra headroom the topmost cover gets clamped against the plot
+        edge. The overlay's pixel extents are converted to data units and the
+        margins widened to fit them; iterated, because widening the range
+        changes the px-per-unit scale the conversion depends on.
+        """
+        self._initial_zoom_pending = False
+        if self._profile_curve_geom is None or not hasattr(self.canvas, "zoomFull"):
+            return
+        try:
+            self.canvas.zoomFull()
+            if not (
+                hasattr(self.canvas, "visibleDistanceRange")
+                and hasattr(self.canvas, "visibleElevationRange")
+                and hasattr(self.canvas, "setVisiblePlotRange")
+            ):
+                return
+            dist_range = self.canvas.visibleDistanceRange()
+            elev_range = self.canvas.visibleElevationRange()
+            d_lo, d_hi = dist_range.lower(), dist_range.upper()
+            e_lo, e_hi = elev_range.lower(), elev_range.upper()
+            dist_len = d_hi - d_lo
+            elev_len = e_hi - e_lo
+            base_dist = max(dist_len * 0.05, 1.0)
+            base_elev = max(elev_len * 0.05, 0.5)
+            margin_left = margin_right = base_dist
+            margin_top = margin_bottom = base_elev
+
+            extents = (
+                self.canvas.manholeDashExtentsPx()
+                if hasattr(self.canvas, "manholeDashExtentsPx")
+                else []
+            )
+            area = self.canvas.plotArea() if hasattr(self.canvas, "plotArea") else None
+            if extents and (area is None or area.isEmpty()) and self._initial_zoom_retries < 5:
+                # Plot area not laid out yet (first render still pending) — the
+                # px→data conversion needs it, so try again shortly.
+                self._initial_zoom_retries += 1
+                QTimer.singleShot(120, self._applyPaddedZoomFull)
+                return
+
+            if (
+                extents
+                and area is not None
+                and not area.isEmpty()
+                and elev_len > 0
+                and dist_len > 0
+            ):
+                for _ in range(3):
+                    px_per_m = area.height() / (elev_len + margin_top + margin_bottom)
+                    px_per_d = area.width() / (dist_len + margin_left + margin_right)
+                    margin_top = margin_bottom = base_elev
+                    margin_left = margin_right = base_dist
+                    for dist, anchor, up_px, down_px, half_w_px in extents:
+                        margin_top = max(margin_top, up_px / px_per_m - (e_hi - anchor))
+                        margin_bottom = max(
+                            margin_bottom, down_px / px_per_m - (anchor - e_lo)
+                        )
+                        margin_left = max(
+                            margin_left, half_w_px / px_per_d - (dist - d_lo)
+                        )
+                        margin_right = max(
+                            margin_right, half_w_px / px_per_d - (d_hi - dist)
+                        )
+
+            self.canvas.setVisiblePlotRange(
+                d_lo - margin_left,
+                d_hi + margin_right,
+                e_lo - margin_bottom,
+                e_hi + margin_top,
+            )
+            self.canvas.refresh()
+        except Exception:
+            pass
 
     def _cancelCanvasJobs(self):
         if hasattr(self.canvas, "cancelJobs"):

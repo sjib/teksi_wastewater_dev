@@ -95,6 +95,69 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
     def dashes(self):
         return self._dashes
 
+    def dashExtentsPx(self):
+        """
+        Schematic pixel extents of each structure around its anchor level, as
+        (distance, anchor_level, up_px, down_px, half_width_px) tuples.
+
+        The shafts/covers are drawn in exaggerated pixel space around the pipe
+        invert, which zoomFull knows nothing about — the widget uses these
+        extents to widen the initial zoom margins so the topmost manhole's
+        cover isn't clamped against the plot edge. Mirrors the anchor/offset
+        cases of paint(); keep the two in sync.
+        """
+        default_px_width = getattr(
+            self._canvas, "_manhole_default_px_width", MANHOLE_DEFAULT_PX_WIDTH
+        )
+        extents = []
+        for dash in self._dashes:
+            distance = dash.get("distance")
+            if distance is None:
+                continue
+            cover_level = dash.get("cover_level")
+            bottom_level = dash.get("bottom_level")
+            invert_level = dash.get("invert_level")
+            cover_missing = dash.get("cover_level_missing", False)
+            bottom_missing = dash.get("bottom_level_missing", False)
+            # cover cap brackets stick out 3px past the wall, plus pen width
+            half_width = dash.get("width", default_px_width) / 2.0 + 5.0
+
+            if cover_missing and bottom_missing:
+                if invert_level is None:
+                    continue
+                # dashed no-level shaft + the '?' mark above it
+                anchor = invert_level
+                up = NO_LEVEL_SHAFT_PX_HEIGHT + 21.0
+                down = 2.0
+            elif cover_level is None and bottom_level is None:
+                continue
+            elif not cover_missing and not bottom_missing:
+                if invert_level is not None:
+                    anchor = invert_level
+                    up = manhole_cover_offset_px(cover_level - invert_level) + 4.0
+                    down = manhole_sump_offset_px(invert_level - bottom_level) + 2.0
+                else:
+                    anchor = bottom_level
+                    up = manhole_shaft_px(cover_level - bottom_level) + 4.0
+                    down = 2.0
+            elif bottom_missing:
+                if invert_level is not None:
+                    anchor = invert_level
+                    up = manhole_cover_offset_px(cover_level - invert_level) + 4.0
+                else:
+                    anchor = cover_level
+                    up = 4.0
+                down = 30.0  # missing-floor X sits 18px below the base
+            else:  # cover missing
+                anchor = invert_level if invert_level is not None else bottom_level
+                up = 30.0  # missing-cover X sits 18px above the top
+                if invert_level is not None:
+                    down = manhole_sump_offset_px(invert_level - bottom_level) + 2.0
+                else:
+                    down = 2.0
+            extents.append((distance, anchor, up, down, half_width))
+        return extents
+
     def setBands(self, bands):
         self._bands = bands or []
         self.update()
@@ -792,6 +855,12 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
         if self._manhole_item is None:
             return []
         return self._manhole_item.dashes()
+
+    def manholeDashExtentsPx(self):
+        """Pixel extents of the drawn structures, for initial-zoom padding."""
+        if self._manhole_item is None:
+            return []
+        return self._manhole_item.dashExtentsPx()
 
     def getManholeDashHitRects(self):
         """(dash, QRectF) pairs in canvas pixels for the structures drawn this frame."""
