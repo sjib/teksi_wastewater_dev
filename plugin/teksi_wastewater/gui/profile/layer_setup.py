@@ -79,13 +79,17 @@ class ProfileLayerSetup:
         """
         self._canvas = canvas
         self._temp_reach_layer = None  # Memory layer with Z values for vw_tww_reach
-        self._temp_node_layer = None  # Node points: XY from ws geometry, Z = wn_bottom_level
-        self._temp_cover_layer = None  # Cover points: XY from ws geometry, Z = co_level
         self._structure_cache = []  # Cached ws features for manhole dash building
         self._reach_source = None  # Original vw_tww_reach layer (for re-filtering)
         self._ws_source = None  # Original vw_tww_wastewater_structure layer
         self._change_point_source = None  # Original vw_change_points layer
         self._change_point_cache = []  # Cached change points for overlay X marks
+        # (x, y, z) of every temp-reach vertex plus a 0.1 m coordinate-bucket
+        # index, rebuilt whenever the reach features are (updatePathFeatures).
+        # Lets _adjacentReachLevel resolve an invert anchor with a lookup
+        # instead of scanning the whole temp layer once per structure.
+        self._reach_vertices = []
+        self._reach_vertex_buckets = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -101,12 +105,13 @@ class ProfileLayerSetup:
         - Structures and change points are drawn by the overlay, not as native
           layers (their markers otherwise collapse onto the pipe invert)
 
-        Node and cover points are memory layers built from
-        vw_tww_wastewater_structure alone: its geometry is the main
-        wastewater node position (sits exactly on the profile curve), Z
-        values come from wn_bottom_level / co_level. No fallback —
-        structures without a level are simply not rendered, keeping missing
-        data visible. Neither vw_cover nor vw_wastewater_node is read.
+        The temp reach layer is the ONLY canvas layer; it is created empty
+        here and filled per selection by updatePathFeatures. Structures are
+        not layers at all: a single pass over vw_tww_wastewater_structure
+        (in updatePathFeatures) caches per-structure entries for the overlay.
+        No fallback — structures without a level are rendered as explicit
+        missing-data marks, never guessed. Neither vw_cover nor
+        vw_wastewater_node is read.
 
         :param tolerance: Snapping tolerance in map units for the canvas.
         """
@@ -114,17 +119,12 @@ class ProfileLayerSetup:
         project = QgsProject.instance()
         self._canvas.setProject(project)
 
-        # Build node/cover point layers from the structure view (single pass).
+        # Sources for the overlay caches (structures, change points). The
+        # caches themselves are filled by updatePathFeatures — which always
+        # runs right after setup() — so each view is fetched once per
+        # selection, not once here for the whole network and again there.
         self._ws_source = TwwLayerManager.layer("vw_tww_wastewater_structure")
-        self._temp_node_layer, self._temp_cover_layer = self._buildStructurePointLayers(
-            self._ws_source
-        )
-
-        # Change points (junction nodes with no structure) are drawn by the
-        # overlay, not as a native layer — same collapse-onto-invert reason as
-        # cover/node. Cache them here from vw_change_points (PointZ, Z = level).
         self._change_point_source = TwwLayerManager.layer("vw_change_points")
-        self._change_point_cache = self._changePointEntries(self._change_point_source, None)
 
         # 2. Define the layers to use (based on working configuration)
         # profile_type: 'surface' = Continuous Surface, 'features' = Individual Features
@@ -174,22 +174,15 @@ class ProfileLayerSetup:
         first_valid_crs = None
 
         for layer_name, _description, profile_type, style in layer_configs:
-            # Node and cover entries are logical names: both are served by the
-            # memory layers built above from vw_tww_wastewater_structure.
-            if layer_name == "vw_wastewater_node":
-                layer = self._temp_node_layer
-            elif layer_name == "vw_cover":
-                layer = self._temp_cover_layer
-            else:
-                layer = TwwLayerManager.layer(layer_name)
+            layer = TwwLayerManager.layer(layer_name)
             if not layer:
                 continue
 
-            # Special handling for vw_tww_reach: create temp layer with Z values
-            # because the original geometry doesn't have proper Z values
+            # Special handling for vw_tww_reach: swap in an (empty) temp layer
+            # with LineStringZ geometry — the original has no usable Z values.
             if layer_name == "vw_tww_reach":
                 self._reach_source = layer
-                self._temp_reach_layer = self._createReachLayerWithZ(layer)
+                self._temp_reach_layer = self._createEmptyReachLayer(layer)
                 if self._temp_reach_layer:
                     layer = self._temp_reach_layer
 
@@ -288,22 +281,12 @@ class ProfileLayerSetup:
         :param node_points: iterable of QgsPointXY of selected path nodes, or None.
         """
         if self._temp_reach_layer is not None and self._reach_source is not None:
-            self._refillLayer(
-                self._temp_reach_layer,
-                self._reachZFeatures(self._reach_source, reach_ids),
-            )
+            reach_features = self._reachZFeatures(self._reach_source, reach_ids)
+            self._refillLayer(self._temp_reach_layer, reach_features)
+            self._rebuildReachVertexIndex(reach_features)
 
-        if (
-            self._ws_source is not None
-            and self._temp_node_layer is not None
-            and self._temp_cover_layer is not None
-        ):
-            node_features, cover_features, structure_cache = self._structureFeatureSets(
-                self._ws_source, node_points
-            )
-            self._refillLayer(self._temp_node_layer, node_features)
-            self._refillLayer(self._temp_cover_layer, cover_features)
-            self._structure_cache = structure_cache
+        if self._ws_source is not None:
+            self._structure_cache = self._structureEntries(self._ws_source, node_points)
 
         if self._change_point_source is not None:
             self._change_point_cache = self._changePointEntries(
@@ -392,44 +375,73 @@ class ProfileLayerSetup:
 
         return dashes
 
+    def _rebuildReachVertexIndex(self, reach_features):
+        """
+        Cache (x, y, z) for every vertex of the current temp-reach features,
+        plus a 0.1 m coordinate-bucket index.
+
+        _adjacentReachLevel used to scan the whole temp layer per structure —
+        O(structures × reaches) geometry calls per selection. Structures sit
+        exactly on reach endpoints (verified against live data), so a bucket
+        hit resolves the invert anchor immediately; a flat scan over all
+        cached vertices remains as the nearest-vertex fallback for points not
+        exactly on a vertex.
+        """
+        vertices = []
+        buckets = {}
+        for feat in reach_features or []:
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            for vertex in geom.vertices():
+                z_value = vertex.z()
+                if z_value is None or math.isnan(z_value):
+                    continue
+                x, y = vertex.x(), vertex.y()
+                vertices.append((x, y, z_value))
+                buckets.setdefault((round(x, 1), round(y, 1)), []).append((x, y, z_value))
+        self._reach_vertices = vertices
+        self._reach_vertex_buckets = buckets
+
     def _adjacentReachLevel(self, point_geom):
         """
-        Invert level to anchor a manhole that has no cover and no bottom level.
+        Invert level to anchor a structure on the profile.
 
-        Both levels are missing, so the shaft has no true Z of its own. Rather
-        than fabricate one, anchor it to the connected reach invert — the Z of
-        the nearest vertex on the temp reach layer (reach endpoints sit on the
-        manhole node). Returns None when no Z-bearing reach is nearby, in which
-        case the canvas simply skips drawing instead of guessing a position.
+        Taken as the Z of the nearest temp-reach vertex (reach endpoints sit on
+        the manhole node), looked up in the index built by
+        _rebuildReachVertexIndex. Returns None when no Z-bearing reach exists,
+        in which case the canvas skips drawing instead of guessing a position.
         """
-        if self._temp_reach_layer is None or point_geom is None:
+        if not self._reach_vertices or point_geom is None:
             return None
         try:
             point = point_geom.asPoint()
         except Exception:
             return None
+        px, py = point.x(), point.y()
+
+        # Fast path: the 3x3 bucket neighbourhood covers every vertex within
+        # ~0.1 m — the exact-coincidence case. Fall back to all vertices so a
+        # structure that is near a reach but not on a vertex still anchors.
+        cx, cy = round(px, 1), round(py, 1)
+        candidates = []
+        for dx in (-0.1, 0.0, 0.1):
+            for dy in (-0.1, 0.0, 0.1):
+                candidates.extend(
+                    self._reach_vertex_buckets.get(
+                        (round(cx + dx, 1), round(cy + dy, 1)), ()
+                    )
+                )
+        if not candidates:
+            candidates = self._reach_vertices
 
         best_z = None
         best_sqr = None
-        for feat in self._temp_reach_layer.getFeatures():
-            geom = feat.geometry()
-            if geom is None or geom.isEmpty():
-                continue
-            try:
-                sqr_dist, vertex_index = geom.closestVertexWithContext(point)
-            except Exception:
-                continue
-            if vertex_index < 0:
-                continue
-            if best_sqr is not None and sqr_dist >= best_sqr:
-                continue
-            vertex = geom.vertexAt(vertex_index)
-            z_value = vertex.z()
-            if z_value is None or math.isnan(z_value):
-                continue
-            best_sqr = sqr_dist
-            best_z = z_value
-
+        for x, y, z_value in candidates:
+            sqr_dist = (x - px) ** 2 + (y - py) ** 2
+            if best_sqr is None or sqr_dist < best_sqr:
+                best_sqr = sqr_dist
+                best_z = z_value
         return best_z
 
     def buildChangePointMarkers(self, profile_curve_geom, tolerance):
@@ -552,16 +564,18 @@ class ProfileLayerSetup:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _createReachLayerWithZ(self, original_layer, reach_ids=None):
+    def _createEmptyReachLayer(self, original_layer):
         """
-        Create a temporary memory layer from vw_tww_reach with proper Z values.
+        Create the temp LineStringZ memory layer for vw_tww_reach (schema only).
 
-        Since vw_tww_reach geometry doesn't have Z values, we read rp_from_level
-        and rp_to_level attributes and set them as the Z coordinates.
+        vw_tww_reach geometry has no Z, so profile features are rebuilt with
+        interpolated Z by _reachZFeatures. The layer is created EMPTY: the one
+        fill per selection happens in updatePathFeatures (setup used to
+        pre-fill the whole network here, only for updatePathFeatures to
+        immediately truncate and refill it).
 
         :param original_layer: The original vw_tww_reach layer
-        :param reach_ids: optional iterable of reach obj_ids to keep (path filter)
-        :return: Memory layer with LineStringZ geometry containing proper Z values
+        :return: Empty memory layer with LineStringZ geometry
         """
         if original_layer is None:
             return None
@@ -577,9 +591,6 @@ class ProfileLayerSetup:
         provider = mem_layer.dataProvider()
         provider.addAttributes(original_layer.fields().toList())
         mem_layer.updateFields()
-
-        provider.addFeatures(self._reachZFeatures(original_layer, reach_ids))
-        mem_layer.updateExtents()
         return mem_layer
 
     def _reachZFeatures(self, original_layer, reach_ids=None):
@@ -661,55 +672,18 @@ class ProfileLayerSetup:
 
         return features
 
-    def _buildStructurePointLayers(self, ws_layer, node_points=None):
+    def _structureEntries(self, ws_layer, node_points=None):
         """
-        Build node and cover PointZ memory layers in one pass over
-        vw_tww_wastewater_structure, caching entries for manhole dashes.
+        Scan vw_tww_wastewater_structure once and cache per-structure entries.
 
-        :param node_points: optional iterable of QgsPointXY of selected path
-            nodes; when given only structures sitting on a path node are kept.
-        """
-        if ws_layer is None:
-            self._structure_cache = []
-            return None, None
-
-        crs = ws_layer.crs()
-        crs_string = crs.authid() if crs.isValid() else "EPSG:2056"
-
-        node_layer = QgsVectorLayer(
-            f"PointZ?crs={crs_string}", "wastewater_node_filtered", "memory"
-        )
-        cover_layer = QgsVectorLayer(f"PointZ?crs={crs_string}", "cover_from_structure", "memory")
-
-        for mem_layer in (node_layer, cover_layer):
-            provider = mem_layer.dataProvider()
-            provider.addAttributes(ws_layer.fields().toList())
-            mem_layer.updateFields()
-
-        node_features, cover_features, structure_cache = self._structureFeatureSets(
-            ws_layer, node_points
-        )
-
-        node_layer.dataProvider().addFeatures(node_features)
-        cover_layer.dataProvider().addFeatures(cover_features)
-        node_layer.updateExtents()
-        cover_layer.updateExtents()
-        self._structure_cache = structure_cache
-        return node_layer, cover_layer
-
-    def _structureFeatureSets(self, ws_layer, node_points=None):
-        """
-        Scan vw_tww_wastewater_structure once and return
-        (node_features, cover_features, structure_cache).
-
-        When node_points is not None, a structure is only included if its
-        profile point coincides with one of the selected path's node points —
-        this keeps side-branch structures out of the profile.
+        Structures are not canvas layers: the ManholeDashPlotItem overlay
+        (shaft, cover cap, missing-data marks) and the hover tooltips all read
+        this cache. When node_points is not None, a structure is only included
+        if its profile point coincides with one of the selected path's node
+        points — this keeps side-branch structures out of the profile.
         """
         path_points = list(node_points) if node_points is not None else None
 
-        node_features = []
-        cover_features = []
         structure_cache = []
 
         for feat in ws_layer.getFeatures():
@@ -731,26 +705,8 @@ class ProfileLayerSetup:
                 _to_float(attrs.get("wn_bottom_level")),
             )
 
-            if bottom_level is not None:
-                node_feat = QgsFeature()
-                node_feat.setGeometry(
-                    QgsGeometry(QgsPoint(point.x(), point.y(), bottom_level))
-                )
-                node_feat.setAttributes(feat.attributes())
-                node_features.append(node_feat)
-
-            if cover_level is not None:
-                cover_feat = QgsFeature()
-                cover_feat.setGeometry(
-                    QgsGeometry(QgsPoint(point.x(), point.y(), cover_level))
-                )
-                cover_feat.setAttributes(feat.attributes())
-                cover_features.append(cover_feat)
-
-            # Both-missing structures used to be dropped here. They are now kept
-            # so the canvas can draw an explicit "no level data" dashed shaft;
-            # no node/cover feature is added (both guards above failed), so
-            # nothing is fabricated for the rendered reach/point layers.
+            # Both-missing structures are kept so the canvas can draw an
+            # explicit "no level data" dashed shaft — nothing is fabricated.
             structure_cache.append(
                 {
                     "geometry": point_geom,
@@ -775,7 +731,7 @@ class ProfileLayerSetup:
                 }
             )
 
-        return node_features, cover_features, structure_cache
+        return structure_cache
 
     def _changePointEntries(self, cp_layer, node_points=None):
         """
