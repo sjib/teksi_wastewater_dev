@@ -104,7 +104,6 @@ class ProfileHoverManager:
         self._map_canvas = map_canvas
 
         # Hover state
-        self._hover_enabled = True
         self._last_hover_match = None
         self._last_hover_pos = None
         self._last_hover_global_pos = None
@@ -152,8 +151,6 @@ class ProfileHoverManager:
 
     def onCanvasMouseMove(self, event):
         """Handle raw mouseMoveEvent forwarded from the canvas."""
-        if not self._hover_enabled:
-            return
         self._last_hover_pos = event.pos()
         self._last_hover_global_pos = self._canvas.mapToGlobal(event.pos())
         self._handleCanvasHover(event.pos())
@@ -244,9 +241,11 @@ class ProfileHoverManager:
 
     def _updateHoverMatch(self, profile_point):
         """
-        Convert hover to plot coordinates and match the nearest profile result.
+        Match the nearest identify() result for a reach/surface hover.
 
-        Uses official identify() API first, then custom manhole hit-test.
+        The overlay hit-tests (cover, manhole, change point) already ran — and
+        missed — in _handleCanvasHover before this is called, so only the
+        official identify() API is consulted here.
         """
         plot_point = self._profilePointToPlotPoint(profile_point)
         if plot_point is None:
@@ -260,10 +259,6 @@ class ProfileHoverManager:
                 identify_results = self._canvas.identify(canvas_point)
             except Exception:
                 pass
-
-        manhole_match = self._identifyManholeDash(plot_point)
-        if manhole_match:
-            identify_results.append(manhole_match)
 
         nearest = self._nearestIdentifyResult(identify_results, plot_point)
 
@@ -650,20 +645,14 @@ class ProfileHoverManager:
             self._last_tooltip_text = None
             return
 
-        current_key = self._matchIdentityKey(match)
-        same_feature = (
-            self._last_hover_match is not None
-            and self._matchIdentityKey(self._last_hover_match) == current_key
-        )
-
         from qgis.PyQt.QtGui import QCursor
 
         current_pos = QCursor.pos()
 
+        # Dedup by the rendered text: a feature change always changes the text
+        # (obj_id is on the first line), so no separate identity check is needed.
         need_update = False
         if not self._last_tooltip_text:
-            need_update = True
-        elif not same_feature:
             need_update = True
         elif text != self._last_tooltip_text:
             need_update = True
@@ -970,18 +959,15 @@ class ProfileHoverManager:
         else:
             self._clearHighlight()
 
-    def _doHighlightFeature(self, layer_name, filter_expr, highlight_key, fallback_layer=None):
+    def _doHighlightFeature(self, layer_name, filter_expr, highlight_key):
         """
         Create a QgsHighlight on the map canvas for the first matching feature.
 
         :param layer_name: Name of the layer to query.
         :param filter_expr: QgsFeatureRequest filter expression string.
         :param highlight_key: Unique key to prevent duplicate highlights.
-        :param fallback_layer: Fallback layer name if primary is not found.
         """
         map_layer = TwwLayerManager.layer(layer_name)
-        if map_layer is None and fallback_layer:
-            map_layer = TwwLayerManager.layer(fallback_layer)
         if map_layer is None:
             self._clearHighlight()
             return
@@ -1038,49 +1024,6 @@ class ProfileHoverManager:
                 attrs[key] = value
 
         return attrs, layer_name, feature, layer
-
-    def _matchIdentityKey(self, match):
-        """Stable identity for tooltip deduplication (layer feature or manhole dash)."""
-        if not match:
-            return None
-
-        layer = match.get("layer")
-        result = match.get("result")
-        if layer is not None and hasattr(layer, "id"):
-            feature = self._extractResultFeature(result, layer)
-            if feature is not None and hasattr(feature, "id"):
-                return ("layer", layer.id(), feature.id())
-            if isinstance(result, dict):
-                fid = result.get("featureId") or result.get("fid") or result.get("id")
-                if fid is not None:
-                    return ("layer", layer.id(), fid)
-            return ("layer", layer.id(), None)
-
-        if isinstance(result, dict):
-            attrs = result.get("attributes") or {}
-            if attrs.get("_is_cover_dash"):
-                co_obj_id = attrs.get("co_obj_id")
-                if co_obj_id:
-                    return ("cover", co_obj_id)
-                distance = result.get("distance")
-                if distance is not None:
-                    return ("cover", distance)
-            if attrs.get("_is_manhole_dash"):
-                obj_id = attrs.get("obj_id")
-                if obj_id:
-                    return ("dash", obj_id)
-                distance = result.get("distance")
-                if distance is not None:
-                    return ("dash", distance)
-            if attrs.get("_is_change_point"):
-                obj_id = attrs.get("obj_id")
-                if obj_id:
-                    return ("change_point", obj_id)
-                distance = result.get("distance")
-                if distance is not None:
-                    return ("change_point", distance)
-
-        return None
 
     def _extractResultAttributes(self, result):
         """Extract attribute dict from a QgsElevationProfile identify result."""

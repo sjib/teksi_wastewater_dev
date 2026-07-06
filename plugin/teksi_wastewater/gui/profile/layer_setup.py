@@ -23,6 +23,7 @@
 # ---------------------------------------------------------------------
 
 import math
+import time
 
 from qgis.core import (
     Qgis,
@@ -312,7 +313,8 @@ class ProfileLayerSetup:
         """
         Build manhole shaft overlay data along a profile curve.
 
-        Uses structure entries cached during setup() — no second layer scan.
+        Uses structure entries cached during updatePathFeatures() — no second
+        layer scan.
 
         :param profile_curve_geom: QgsGeometry of the profile path.
         :param tolerance: Max distance from curve in map units.
@@ -552,7 +554,6 @@ class ProfileLayerSetup:
             attrs = _feature_attributes(feat)
             bands.append(
                 {
-                    "obj_id": attrs.get("obj_id"),
                     "invert": points,
                     "clear_height_mm": _to_float(attrs.get("clear_height")),
                 }
@@ -1039,6 +1040,13 @@ def manhole_sump_offset_px(invert_above_floor_m):
 _VALUE_LIST_LANGS = ("en", "de", "fr", "it", "ro")
 _value_list_cache = {}  # table name -> {code: term}
 
+# After a failed load (DB unreachable), don't retry for this long. Tooltips
+# resolve several value lists per format and are rebuilt on mouse move, so
+# without this throttle a down DB means one connection attempt (potentially a
+# seconds-long timeout) per list per move — freezing the GUI while hovering.
+_VALUE_LIST_RETRY_SECONDS = 30.0
+_value_list_failed_at = None  # time.monotonic() of the last failed load
+
 
 def _value_list_language():
     """Return the 2-letter language the TEKSI value lists should be shown in."""
@@ -1059,8 +1067,18 @@ def _value_list_language():
 
 def _load_value_list(table):
     """Load and cache a ``tww_vl.<table>`` code -> localized term mapping."""
+    global _value_list_failed_at
+
     if table in _value_list_cache:
         return _value_list_cache[table]
+
+    # DB recently unreachable: fail fast until the retry window elapses, so a
+    # down DB degrades tooltips to raw codes instead of stalling every hover.
+    if (
+        _value_list_failed_at is not None
+        and time.monotonic() - _value_list_failed_at < _VALUE_LIST_RETRY_SECONDS
+    ):
+        return {}
 
     lang = _value_list_language()
     try:
@@ -1071,9 +1089,12 @@ def _load_value_list(table):
             f"FROM tww_vl.{table}"
         )
     except Exception:
-        # DB not reachable yet — return without caching so a later hover retries.
+        # DB not reachable — not cached (a later hover retries), but throttled
+        # via _value_list_failed_at (see _VALUE_LIST_RETRY_SECONDS).
+        _value_list_failed_at = time.monotonic()
         return {}
 
+    _value_list_failed_at = None
     mapping = {}
     for code, term in rows or []:
         if code is None or term is None:

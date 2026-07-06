@@ -92,9 +92,6 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         self._cover_hit_rects = []
         self.update()
 
-    def dashes(self):
-        return self._dashes
-
     def dashExtentsPx(self):
         """
         Schematic pixel extents of each structure around its anchor level, as
@@ -850,11 +847,6 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
 
     def manholeDefaultPxWidth(self):
         return self._manhole_default_px_width
-
-    def getManholeDashes(self):
-        if self._manhole_item is None:
-            return []
-        return self._manhole_item.dashes()
 
     def manholeDashExtentsPx(self):
         """Pixel extents of the drawn structures, for initial-zoom padding."""
