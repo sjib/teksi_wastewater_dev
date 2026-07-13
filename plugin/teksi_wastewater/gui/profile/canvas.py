@@ -26,7 +26,15 @@ import math
 
 from qgis.core import QgsProfilePoint
 from qgis.PyQt.QtCore import QPointF, QRectF, Qt
-from qgis.PyQt.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygonF
+from qgis.PyQt.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QPainter,
+    QPen,
+    QPolygonF,
+)
 from qgis.gui import QgsElevationProfileCanvas, QgsPlotCanvasItem
 
 from .layer_setup import (
@@ -46,6 +54,11 @@ NO_LEVEL_SHAFT_PX_HEIGHT = 30.0
 # Extra hover slack above the cover cap. The cap sits at the very top of a small
 # box and users aim at it or a little above, so the hit rect extends this far up.
 COVER_HOVER_MARGIN_PX = 16.0
+
+# Vertical room reserved above a labelled cover cap for its identifier caption —
+# used both when drawing the label and in dashExtentsPx, so the initial zoom
+# leaves space for the topmost manhole's caption instead of clamping it.
+STRUCTURE_LABEL_HEADROOM_PX = 12.0
 
 
 class ManholeDashPlotItem(QgsPlotCanvasItem):
@@ -152,6 +165,10 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                     down = manhole_sump_offset_px(invert_level - bottom_level) + 2.0
                 else:
                     down = 2.0
+            # Only shafts with a cover cap get an identifier caption above it;
+            # reserve room for it so the initial zoom doesn't clamp the label.
+            if not cover_missing and dash.get("identifier"):
+                up += STRUCTURE_LABEL_HEADROOM_PX
             extents.append((distance, anchor, up, down, half_width))
         return extents
 
@@ -221,6 +238,9 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         # Pipe bands first, so manhole shafts/cover lines draw on top of them.
         self._drawReachBands(painter, plot_area)
 
+        # Axis unit captions whenever any profile content is drawn.
+        self._drawAxisCaptions(painter, plot_area)
+
         # Reset before the early return so an empty-dash frame can't leave stale
         # hover rects from the previous frame.
         self._hit_rects = []
@@ -254,6 +274,9 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
 
         any_x = False
         any_question = False
+        # (center_x, cap_top_y, text) for identifier captions, drawn after the
+        # loop so collision-skipping can order them left-to-right.
+        label_candidates = []
 
         for dash in self._dashes:
             distance = dash.get("distance")
@@ -378,6 +401,8 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                 painter.drawLine(QPointF(left_x, floor_y), QPointF(right_x, floor_y))
 
                 self._drawCoverCap(painter, QPointF(anchor_x, top_y), half_width, cover_pen)
+                if dash.get("identifier"):
+                    label_candidates.append((anchor_x, top_y, str(dash["identifier"])))
                 # Pad the hit rect generously, especially on top: the cover cap
                 # sits at the very top of a small box and users aim at it (or a
                 # little above), so a tight rect makes the cover feel unhoverable.
@@ -425,6 +450,8 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                     painter.drawLine(QPointF(left_x, top_y), QPointF(left_x, base_y))
                     painter.drawLine(QPointF(right_x, top_y), QPointF(right_x, base_y))
                 self._drawCoverCap(painter, QPointF(anchor_x, top_y), half_width, cover_pen)
+                if dash.get("identifier"):
+                    label_candidates.append((anchor_x, top_y, str(dash["identifier"])))
                 x_center = QPointF(anchor_x, base_y + 18.0)
                 self._drawMissingDataX(painter, x_center)
                 self._drawMissingLabel(painter, x_center, "no bottom level")
@@ -479,8 +506,63 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                 )
                 any_x = True
 
+        self._drawStructureLabels(painter, plot_area, label_candidates)
+
         if any_x or any_question:
             self._drawMissingLegend(painter, plot_area, any_x, any_question)
+
+    def _drawAxisCaptions(self, painter, plot_area):
+        """
+        Unit captions for the two axes, drawn inside the plot corners.
+
+        QgsElevationProfileCanvas exposes no axis-title API (its Qgs2DPlot is
+        internal), so the overlay paints them itself: elevation in the
+        top-left corner (the missing-data legend starts below it), distance
+        in the bottom-right corner.
+        """
+        if plot_area is None or plot_area.isEmpty():
+            return
+        painter.setFont(self._missingDataFont())
+        painter.setPen(QPen(QColor("#666666")))
+        painter.drawText(
+            QPointF(plot_area.left() + 6.0, plot_area.top() + 12.0),
+            "Elevation [m a.s.l.]",
+        )
+        text = "Distance [m]"
+        width = QFontMetrics(painter.font()).horizontalAdvance(text)
+        painter.drawText(
+            QPointF(plot_area.right() - width - 6.0, plot_area.bottom() - 6.0), text
+        )
+
+    def _drawStructureLabels(self, painter, plot_area, candidates):
+        """
+        Identifier captions above the cover caps.
+
+        Drawn left-to-right; a label that would overlap the one before it is
+        skipped entirely (zooming in spreads the shafts apart and reveals it)
+        so a dense section can't degrade into an unreadable smear. The
+        baseline is clamped into the plot so the topmost manhole keeps its
+        caption instead of losing it above the edge.
+        """
+        if not candidates:
+            return
+        color = getattr(self._canvas, "_manhole_cover_color", QColor("#2C3E50"))
+        painter.setFont(self._missingDataFont())
+        painter.setPen(QPen(color))
+        metrics = QFontMetrics(painter.font())
+        last_right = None
+        for center_x, cap_y, text in sorted(candidates, key=lambda c: c[0]):
+            width = metrics.horizontalAdvance(text)
+            left = center_x - width / 2.0
+            if last_right is not None and left < last_right + 6.0:
+                continue
+            baseline = cap_y - 7.0
+            if plot_area is not None and not plot_area.isEmpty():
+                if left < plot_area.left() or left + width > plot_area.right():
+                    continue
+                baseline = max(baseline, plot_area.top() + metrics.ascent() + 2.0)
+            painter.drawText(QPointF(left, baseline), text)
+            last_right = left + width
 
     def _drawReachBands(self, painter, plot_area):
         """
@@ -765,7 +847,8 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         """Top-left legend for whichever missing-data markers are present."""
         if plot_area is not None and not plot_area.isEmpty():
             x0 = plot_area.left() + 10.0
-            y0 = plot_area.top() + 14.0
+            # Below the "Elevation [m a.s.l.]" axis caption in the same corner.
+            y0 = plot_area.top() + 30.0
         else:
             top_left = self._rect.topLeft()
             x0 = top_left.x() + 12.0

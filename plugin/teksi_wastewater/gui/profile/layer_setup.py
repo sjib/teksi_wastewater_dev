@@ -355,6 +355,7 @@ class ProfileLayerSetup:
                 {
                     "distance": float(distance_along),
                     "obj_id": entry["obj_id"],
+                    "identifier": entry.get("identifier"),
                     "ws_type": entry.get("ws_type"),
                     "cover_level": entry["cover_level"],
                     "bottom_level": entry["bottom_level"],
@@ -712,6 +713,7 @@ class ProfileLayerSetup:
                 {
                     "geometry": point_geom,
                     "obj_id": attrs.get("obj_id"),
+                    "identifier": attrs.get("identifier"),
                     "ws_type": attrs.get("ws_type"),
                     "cover_level": cover_level,
                     "bottom_level": bottom_level,
