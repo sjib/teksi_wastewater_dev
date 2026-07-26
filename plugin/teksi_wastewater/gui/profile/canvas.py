@@ -113,8 +113,26 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         The shafts/covers are drawn in exaggerated pixel space around the pipe
         invert, which zoomFull knows nothing about — the widget uses these
         extents to widen the initial zoom margins so the topmost manhole's
-        cover isn't clamped against the plot edge. Mirrors the anchor/offset
-        cases of paint(); keep the two in sync.
+        cover isn't clamped against the plot edge.
+
+        These follow the anchor/offset cases of paint() but deliberately do
+        NOT reproduce them — do not "sync" the two. This answers "how much
+        elevation headroom must the initial view reserve", whose honest answer
+        is the SCHEMATIC height, MANHOLE_MAX_SHAFT_PX cap included, because
+        that cap *is* the decision that deep shafts are drawn 70px tall rather
+        than to scale. paint() additionally raises the wall of a deep drop
+        shaft to its true cover (min(top_y_exag, cover_true_pt.y())), which
+        answers a different question: how far the wall must reach for the
+        inflow pipe to land on it instead of dangling in mid-air.
+
+        Reporting that true height here would make _applyPaddedZoomFull
+        reserve the whole real depth — 56.3 m for structure 10.098, a vortex
+        manhole — and since the padded range also decides the auto-snapped
+        vertical exaggeration, a single deep shaft would flatten a short path
+        into a horizontal line at a low exaggeration, destroying the point of
+        a length profile. paint() overshooting the reserved headroom is
+        clamped to the plot edge instead, which is why very deep structures
+        are intentionally not depth-comparable by eye.
         """
         default_px_width = getattr(
             self._canvas, "_manhole_default_px_width", MANHOLE_DEFAULT_PX_WIDTH
@@ -361,6 +379,7 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                     # a deep drop shaft (e.g. a 56m vortex_manhole) has its true
                     # cover far higher, so the shaft reaches its real cover and the
                     # inflow pipe lands on the wall instead of dangling mid-air.
+                    # dashExtentsPx() deliberately omits this — see its docstring.
                     top_y_exag = invert_pt.y() - manhole_cover_offset_px(cover_level - invert_level)
                     cover_true_pt = self._projectPoint(distance, cover_level, mapper)
                     top_y = (
