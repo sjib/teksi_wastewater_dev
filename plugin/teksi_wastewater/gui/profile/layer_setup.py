@@ -27,7 +27,9 @@ import time
 
 from qgis.core import (
     Qgis,
+    QgsExpression,
     QgsFeature,
+    QgsFeatureRequest,
     QgsFillSymbol,
     QgsGeometry,
     QgsLineString,
@@ -36,6 +38,7 @@ from qgis.core import (
     QgsPoint,
     QgsPointXY,
     QgsProject,
+    QgsRectangle,
     QgsSimpleLineSymbolLayer,
     QgsVectorLayer,
     QgsVectorLayerElevationProperties,
@@ -602,19 +605,13 @@ class ProfileLayerSetup:
 
         :param reach_ids: when not None, only reaches whose obj_id is in this
             set are included — this restricts the profile to the selected path
-            instead of every reach that happens to lie near the curve.
+            instead of every reach that happens to lie near the curve. The
+            restriction is pushed into the feature request (_features_by_obj_id),
+            so the whole view is never streamed just to discard it here.
         """
-        id_filter = set(reach_ids) if reach_ids is not None else None
         features = []
 
-        for feat in original_layer.getFeatures():
-            if id_filter is not None:
-                try:
-                    if feat["obj_id"] not in id_filter:
-                        continue
-                except KeyError:
-                    continue
-
+        for feat in _features_by_obj_id(original_layer, reach_ids):
             from_level = None
             to_level = None
 
@@ -682,13 +679,16 @@ class ProfileLayerSetup:
         (shaft, cover cap, missing-data marks) and the hover tooltips all read
         this cache. When node_points is not None, a structure is only included
         if its profile point coincides with one of the selected path's node
-        points — this keeps side-branch structures out of the profile.
+        points — this keeps side-branch structures out of the profile. That
+        exact test still runs here; the path's bounding box is pushed into the
+        feature request first (_features_near_path) so only structures near the
+        path are fetched at all, instead of the whole network per selection.
         """
         path_points = list(node_points) if node_points is not None else None
 
         structure_cache = []
 
-        for feat in ws_layer.getFeatures():
+        for feat in _features_near_path(ws_layer, path_points):
             attrs = _feature_attributes(feat)
             point_geom = _structure_profile_point(feat)
             if point_geom is None:
@@ -750,7 +750,9 @@ class ProfileLayerSetup:
 
         path_points = list(node_points) if node_points is not None else None
         entries = []
-        for feat in cp_layer.getFeatures():
+        # Bounding-box pre-filtered in the request, exactly like the structures
+        # above; _point_on_path below still does the exact node test.
+        for feat in _features_near_path(cp_layer, path_points):
             geom = feat.geometry()
             if geom is None or geom.isEmpty():
                 continue
@@ -895,6 +897,62 @@ def _feature_attributes(feature):
         return attrs
     except Exception:
         return {}
+
+
+def _features_by_obj_id(layer, obj_ids):
+    """
+    Features of ``layer`` whose ``obj_id`` is in ``obj_ids``.
+
+    The filter goes into the QgsFeatureRequest so the provider (and, for the
+    postgres views, the database) does the work. Fetching the whole view and
+    dropping non-matching rows in Python meant a full-network round-trip on
+    every profile selection — the same ``obj_id IN (...)`` form is already used
+    by TwwElevationProfileWidget.setProfileFromTree.
+
+    :param obj_ids: iterable of obj_ids, or None to keep every feature.
+    :return: a feature iterator (empty when ``obj_ids`` is an empty selection).
+    """
+    if obj_ids is None:
+        return layer.getFeatures()
+    # Ids come from the DB, but quote them properly rather than concatenating.
+    quoted = [QgsExpression.quotedString(str(obj_id)) for obj_id in obj_ids if obj_id]
+    if not quoted:
+        return iter(())
+    request = QgsFeatureRequest()
+    request.setFilterExpression(f'"obj_id" IN ({",".join(quoted)})')
+    return layer.getFeatures(request)
+
+
+def _features_near_path(layer, path_points, buffer_m=1.0):
+    """
+    Features of ``layer`` within the bounding box of the selected path's nodes.
+
+    A COARSE pre-filter only: it lets the provider use its spatial index instead
+    of streaming the whole view, and the caller still runs _point_on_path for
+    the exact node-coincidence test. ``buffer_m`` is an order of magnitude wider
+    than that test's 0.1 m tolerance, so the box can never exclude a structure
+    that would have matched.
+
+    The rect is in layer CRS — same assumption _point_on_path already makes when
+    it compares structure and path coordinates directly (all TEKSI views share
+    the project CRS).
+
+    :param path_points: iterable of QgsPointXY, or None to keep every feature.
+    :return: a feature iterator (empty when ``path_points`` is empty).
+    """
+    if path_points is None:
+        return layer.getFeatures()
+    xs = [p.x() for p in path_points]
+    ys = [p.y() for p in path_points]
+    if not xs:
+        return iter(())
+    rect = QgsRectangle(
+        min(xs) - buffer_m,
+        min(ys) - buffer_m,
+        max(xs) + buffer_m,
+        max(ys) + buffer_m,
+    )
+    return layer.getFeatures(QgsFeatureRequest().setFilterRect(rect))
 
 
 def _point_on_path(point, path_points, max_sqr_dist=0.01):
