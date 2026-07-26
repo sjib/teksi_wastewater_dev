@@ -442,6 +442,12 @@ class TeksiWastewaterPlugin:
         if self.exportAction in self.toolbar.actions():
             self.toolbar.removeAction(self.exportAction)
 
+        # Detach the toolbar from the main window before the deferred delete:
+        # Plugin Reloader re-adds a toolbar with the same objectName within the
+        # same event-loop turn, and a still-parented old one makes QGIS warn
+        # about "duplicated widget(s) not cleaned up ... during unload".
+        self.iface.mainWindow().removeToolBar(self.toolbar)
+        self.toolbar.setParent(None)
         self.toolbar.deleteLater()
 
         self.iface.removePluginMenu(self.main_menu_name, self.profileAction)
@@ -458,6 +464,23 @@ class TeksiWastewaterPlugin:
             self.iface.removeDockWidget(self.selectionExtenderWidget)
             self.selectionExtenderWidget.deleteLater()
             self.selectionExtenderWidget = None
+
+        # The profile and wizard docks are created lazily and stay parented to
+        # the main window; without this a reload leaves the old dock behind
+        # next to the one the new plugin instance creates.
+        if self.profile_dock is not None:
+            dock = self.profile_dock
+            self.iface.removeDockWidget(dock)
+            # close() runs the regular teardown (onDockClosed restores the map
+            # tool and clears our references) and WA_DeleteOnClose deletes it.
+            dock.close()
+            self.profile_dock = None
+
+        if self.wizarddock is not None:
+            self.iface.removeDockWidget(self.wizarddock)
+            self.wizarddock.setParent(None)
+            self.wizarddock.deleteLater()
+            self.wizarddock = None
 
     def _on_layer_loaded(self, i, n):
         """
