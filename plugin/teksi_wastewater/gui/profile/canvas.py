@@ -961,6 +961,18 @@ class TwwElevationProfileCanvas(QgsElevationProfileCanvas):
             return []
         return self._manhole_item.changePointHitRects()
 
+    def refreshOverlay(self):
+        """
+        Repaint the manhole/band overlay after the visible plot RANGE changed.
+
+        plotAreaChanged only fires when the plot's pixel rectangle changes, not
+        when setVisiblePlotRange moves the data range under it — but the overlay
+        projects through that range, so it has to be told explicitly or the
+        shafts stay put while the pipe line moves beneath them.
+        """
+        if self._manhole_item is not None:
+            self._manhole_item.update()
+
     def _onPlotAreaChanged(self):
         if self._manhole_item is not None:
             self._manhole_item.update()

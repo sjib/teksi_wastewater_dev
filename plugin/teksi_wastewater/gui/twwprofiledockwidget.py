@@ -90,8 +90,40 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
     def addPlotWidget(self, plot_widget):
         self.plotWidget = plot_widget
         self.verticalLayoutForPlot.addWidget(self.plotWidget)
+        if hasattr(self.plotWidget, "fitExaggerationComputed"):
+            self.plotWidget.fitExaggerationComputed.connect(self.onFitExaggerationComputed)
+        # Take the startup label from the LUT rather than the .ui string, so the
+        # two cannot drift apart, and seed the widget with the same value: the
+        # profile is drawn at exactly the ratio the label claims. This value
+        # only governs until the first path is selected, which snaps the slider
+        # to that path's own scale (onFitExaggerationComputed).
         ve_val = self.veLUT[self.mSliderVerticalExaggeration.value()]
+        self.mLblVerticalExaggeration.setText(str(ve_val) + "x")
         self.plotWidget.changeVerticalExaggeration(ve_val)
+
+    @pyqtSlot(float)
+    def onFitExaggerationComputed(self, fit_ve):
+        """
+        Snap the slider to the best step for the path that was just selected.
+
+        The widget reports the ratio at which the whole path exactly fills the
+        canvas; which discrete steps exist is the dock's business, so the
+        snapping lives here. A single fixed default cannot serve every network
+        — the readable exaggeration follows the slope, and slopes differ by an
+        order of magnitude between a steep alpine network and a flat one.
+
+        Snapping DOWN (the largest step that still fits) keeps the promise that
+        a freshly selected path is first shown whole; snapping up would clip
+        it. Setting the slider re-enters onVerticalExaggerationChanged, which
+        relabels and re-applies — and when the step is already right nothing is
+        emitted, leaving the widget to apply the value it already holds.
+        """
+        target = min(self.veLUT)
+        for slider_value in sorted(self.veLUT):
+            if self.veLUT[slider_value] <= fit_ve:
+                target = slider_value
+        if self.mSliderVerticalExaggeration.value() != target:
+            self.mSliderVerticalExaggeration.setValue(target)
 
     @pyqtSlot(int)
     def onVerticalExaggerationChanged(self, value):

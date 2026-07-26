@@ -146,7 +146,7 @@
            <item>
             <widget class="QLabel" name="mLblVerticalExaggeration">
              <property name="text">
-              <string>10x</string>
+              <string>1x</string>
              </property>
             </widget>
            </item>
@@ -168,10 +168,10 @@
               <number>1</number>
              </property>
              <property name="value">
-              <number>5</number>
+              <number>1</number>
              </property>
              <property name="sliderPosition">
-              <number>5</number>
+              <number>1</number>
              </property>
              <property name="orientation">
               <enum>Qt::Vertical</enum>

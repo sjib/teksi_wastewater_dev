@@ -25,7 +25,7 @@
 from datetime import date
 
 from qgis.core import QgsFeatureRequest, QgsGeometry, QgsLineString
-from qgis.PyQt.QtCore import QRectF, QTimer
+from qgis.PyQt.QtCore import QRectF, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QFont, QPageLayout, QPageSize, QPainter
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox, QVBoxLayout, QWidget
 
@@ -47,6 +47,11 @@ class TwwElevationProfileWidget(QWidget):
     This widget replaces the old TwwPlotSVGWidget which used QtWebKit.
     """
 
+    #: Emitted after a new path has been fitted, carrying the exaggeration at
+    #: which that path exactly fills the canvas. The dock listens and moves the
+    #: slider there — see TwwProfileDockWidget.onFitExaggerationComputed.
+    fitExaggerationComputed = pyqtSignal(float)
+
     def __init__(self, parent):
         """
         Initialize the elevation profile widget.
@@ -64,10 +69,18 @@ class TwwElevationProfileWidget(QWidget):
         layout.addWidget(self.canvas)
 
         # Misc state
-        self.verticalExaggeration = 10.0
+        self.verticalExaggeration = 1.0
         self._data_sources_setup = False
         self._profile_curve_geom = None
         self._manhole_dash_tolerance = 10.0
+
+        # The exaggeration slider emits on every step of a drag and a dock
+        # resize emits continuously, while each re-scale refreshes the canvas
+        # (re-running profile generation) — so coalesce bursts into one apply.
+        self._ve_timer = QTimer(self)
+        self._ve_timer.setSingleShot(True)
+        self._ve_timer.setInterval(80)
+        self._ve_timer.timeout.connect(self._applyVerticalExaggeration)
 
         # Initial padded zoom is applied when the async profile generation
         # finishes (see _onActiveJobCountChanged), not on a 0ms timer: the
@@ -110,11 +123,30 @@ class TwwElevationProfileWidget(QWidget):
         """
         Change the vertical exaggeration of the profile.
 
+        Called by TwwProfileDockWidget on every slider step, and once from
+        addPlotWidget at startup — at which point there is no profile yet, so
+        the value is only recorded, for the first _applyPaddedZoomFull to
+        pick up.
+
         :param val: Vertical exaggeration value (e.g., 10 for 10x).
         """
         self.verticalExaggeration = float(val)
-        # TODO: Apply vertical exaggeration to canvas
-        # Note: QgsElevationProfileCanvas uses axisScaleRatio() which is read-only
+        self._ve_timer.start()
+
+    def resizeEvent(self, event):
+        """
+        Re-apply the exaggeration when the dock geometry changes.
+
+        The elevation span that realises a given ratio depends on the plot's
+        pixel aspect (see _applyVerticalExaggeration), so resizing the dock —
+        or anything else that changes the canvas size — would silently drift
+        the drawn ratio away from the slider label if it were not recomputed.
+        """
+        QWidget.resizeEvent(self, event)
+        # getattr: this can fire while __init__ is still wiring up the layout,
+        # before the state it reads exists.
+        if getattr(self, "_profile_curve_geom", None) is not None:
+            self._ve_timer.start()
 
     def printProfile(self):
         """
@@ -520,9 +552,10 @@ class TwwElevationProfileWidget(QWidget):
                 else []
             )
             area = self.canvas.plotArea() if hasattr(self.canvas, "plotArea") else None
-            if extents and (area is None or area.isEmpty()) and self._initial_zoom_retries < 5:
-                # Plot area not laid out yet (first render still pending) — the
-                # px→data conversion needs it, so try again shortly.
+            if (area is None or area.isEmpty()) and self._initial_zoom_retries < 5:
+                # Plot area not laid out yet (first render still pending) — both
+                # the px→data conversion and the exaggeration span need it, so
+                # try again shortly.
                 self._initial_zoom_retries += 1
                 QTimer.singleShot(120, self._applyPaddedZoomFull)
                 return
@@ -557,9 +590,104 @@ class TwwElevationProfileWidget(QWidget):
                 e_lo - margin_bottom,
                 e_hi + margin_top,
             )
-            self.canvas.refresh()
+            # This padded range is exactly "the whole path, just fitting", so
+            # the ratio it represents is the most useful exaggeration for THIS
+            # path. Report it before applying: a fixed default cannot suit
+            # every network, because the readable exaggeration is set by the
+            # slope, which varies by an order of magnitude (an alpine 90‰ line
+            # is already steep at 2x, while a flat 5‰ sewer stays a horizontal
+            # line until ~40x).
+            fit_ve = self._fitExaggeration(
+                area,
+                (d_hi + margin_right) - (d_lo - margin_left),
+                (e_hi + margin_top) - (e_lo - margin_bottom),
+            )
+            if fit_ve is not None:
+                self.fitExaggerationComputed.emit(fit_ve)
+
+            # The padded zoom-full contributes the distance range and the
+            # elevation CENTRE; the elevation span then comes from the
+            # exaggeration, so the path is drawn at the ratio the label claims
+            # instead of at whatever ratio happened to make it fit. It
+            # refreshes on success, so only refresh here when it declines.
+            if not self._applyVerticalExaggeration():
+                self.canvas.refresh()
         except Exception:
             pass
+
+    @staticmethod
+    def _fitExaggeration(area, dist_span, elev_span):
+        """
+        The exaggeration at which a span of data exactly fills the plot area —
+        the inverse of the elev_span formula in _applyVerticalExaggeration.
+
+        :returns: The ratio, or None when it cannot be computed.
+        """
+        if area is None or area.isEmpty() or area.width() <= 0 or area.height() <= 0:
+            return None
+        if dist_span <= 0 or elev_span <= 0:
+            return None
+        return area.height() * dist_span / (area.width() * elev_span)
+
+    def _applyVerticalExaggeration(self):
+        """
+        Rescale the visible elevation range to honour self.verticalExaggeration,
+        keeping the distance range and the elevation centre fixed.
+
+        QgsElevationProfileCanvas has no exaggeration setter — axisScaleRatio()
+        is read-only — but exaggeration is just the ratio of the two axis
+        scales, so it can be reached through the elevation range:
+
+            VE = (plot_h / elev_span) / (plot_w / dist_span)
+              => elev_span = plot_h * dist_span / (VE * plot_w)
+
+        This is the single place the drawn ratio is decided — the initial view
+        comes through here too (from _applyPaddedZoomFull, which supplies the
+        distance range and the elevation centre), so what the label says is
+        always what is drawn. Content taller than the resulting span runs off
+        the top and bottom, and that is correct: exaggerating vertically IS
+        zooming in vertically, and the user pans to follow it.
+
+        :returns: True when a new range was applied; False when the canvas is
+                  not ready (no profile yet, or no laid-out plot area) and the
+                  caller still owns the refresh.
+        """
+        if self._profile_curve_geom is None or self.verticalExaggeration <= 0:
+            return False
+        if not (
+            hasattr(self.canvas, "plotArea")
+            and hasattr(self.canvas, "visibleDistanceRange")
+            and hasattr(self.canvas, "visibleElevationRange")
+            and hasattr(self.canvas, "setVisiblePlotRange")
+        ):
+            return False
+
+        area = self.canvas.plotArea()
+        if area is None or area.isEmpty() or area.width() <= 0 or area.height() <= 0:
+            return False
+
+        dist_range = self.canvas.visibleDistanceRange()
+        d_lo, d_hi = dist_range.lower(), dist_range.upper()
+        dist_span = d_hi - d_lo
+        if dist_span <= 0:
+            return False
+
+        elev_span = area.height() * dist_span / (self.verticalExaggeration * area.width())
+        if elev_span <= 0:
+            return False
+
+        elev_range = self.canvas.visibleElevationRange()
+        centre = (elev_range.lower() + elev_range.upper()) / 2.0
+        # An immediate apply satisfies any pending debounced one — without this
+        # the auto-snap on a new path would refresh the canvas a second time.
+        self._ve_timer.stop()
+        self.canvas.setVisiblePlotRange(
+            d_lo, d_hi, centre - elev_span / 2.0, centre + elev_span / 2.0
+        )
+        self.canvas.refresh()
+        if hasattr(self.canvas, "refreshOverlay"):
+            self.canvas.refreshOverlay()
+        return True
 
     def _cancelCanvasJobs(self):
         if hasattr(self.canvas, "cancelJobs"):
