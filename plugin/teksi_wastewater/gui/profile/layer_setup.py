@@ -51,7 +51,7 @@ from ...utils.twwlayermanager import TwwLayerManager
 
 # Narrowest schematic shaft width (px); also the fallback when ma_dimension1 is
 # missing, so a manhole with no known width reads as the thinnest, not the widest.
-MANHOLE_DEFAULT_PX_WIDTH = 14
+MANHOLE_DEFAULT_PX_WIDTH = 10
 
 # Schematic manhole shaft height (px). Real shaft depth (2-10 m) is sub-pixel
 # once a whole network's relief is in view, so the height is exaggerated and
@@ -1024,13 +1024,14 @@ def manhole_dash_width(dim1_mm, default_px=MANHOLE_DEFAULT_PX_WIDTH):
 
     A manhole is ~0.6-0.9 m wide, which on the distance axis (hundreds of
     metres) would be sub-pixel — so width is a *schematic, exaggerated* glyph,
-    not to scale. ``dim1_mm / 25`` spreads the narrow real range across a
-    readable 14-48 px band so bigger manholes look bigger; the true dimension
-    stays in the tooltip. Missing dimension falls back to the narrowest width.
+    not to scale. ``dim1_mm / 70`` maps the common 600-900 mm range to a
+    10-13 px band; real data barely spreads (median 800 mm), so the band is
+    kept narrow to reduce crowding on long paths and the true dimension stays
+    in the tooltip. Missing dimension falls back to the narrowest width.
     """
     if dim1_mm is None:
         return default_px
-    return max(14.0, min(48.0, float(dim1_mm) / 25.0))
+    return max(10.0, min(28.0, float(dim1_mm) / 70.0))
 
 
 def reach_band_px(clear_height_mm):
