@@ -530,6 +530,11 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         if any_x or any_question:
             self._drawMissingLegend(painter, plot_area, any_x, any_question)
 
+    #: Axis caption texts, shared by drawing and the label collision rects so
+    #: the two cannot drift apart.
+    AXIS_ELEV_CAPTION = "Elevation [m a.s.l.]"
+    AXIS_DIST_CAPTION = "Distance [m]"
+
     def _drawAxisCaptions(self, painter, plot_area):
         """
         Unit captions for the two axes, drawn inside the plot corners.
@@ -545,13 +550,38 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         painter.setPen(QPen(QColor("#666666")))
         painter.drawText(
             QPointF(plot_area.left() + 6.0, plot_area.top() + 12.0),
-            "Elevation [m a.s.l.]",
+            self.AXIS_ELEV_CAPTION,
         )
-        text = "Distance [m]"
-        width = QFontMetrics(painter.font()).horizontalAdvance(text)
+        width = QFontMetrics(painter.font()).horizontalAdvance(self.AXIS_DIST_CAPTION)
         painter.drawText(
-            QPointF(plot_area.right() - width - 6.0, plot_area.bottom() - 6.0), text
+            QPointF(plot_area.right() - width - 6.0, plot_area.bottom() - 6.0),
+            self.AXIS_DIST_CAPTION,
         )
+
+    def _axisCaptionRects(self, plot_area, metrics):
+        """
+        Screen rects of the two axis captions (same font as the labels), so
+        _drawStructureLabels can treat them as occupied space. Geometry must
+        match _drawAxisCaptions.
+        """
+        if plot_area is None or plot_area.isEmpty():
+            return []
+        elev_w = metrics.horizontalAdvance(self.AXIS_ELEV_CAPTION)
+        dist_w = metrics.horizontalAdvance(self.AXIS_DIST_CAPTION)
+        return [
+            QRectF(
+                plot_area.left() + 6.0,
+                plot_area.top() + 12.0 - metrics.ascent(),
+                elev_w,
+                metrics.height(),
+            ),
+            QRectF(
+                plot_area.right() - dist_w - 6.0,
+                plot_area.bottom() - 6.0 - metrics.ascent(),
+                dist_w,
+                metrics.height(),
+            ),
+        ]
 
     def _drawStructureLabels(self, painter, plot_area, candidates):
         """
@@ -559,9 +589,11 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
 
         Drawn left-to-right; a label that would overlap the one before it is
         skipped entirely (zooming in spreads the shafts apart and reveals it)
-        so a dense section can't degrade into an unreadable smear. The
-        baseline is clamped into the plot so the topmost manhole keeps its
-        caption instead of losing it above the edge.
+        so a dense section can't degrade into an unreadable smear. The same
+        skip applies to the axis captions: a label clamped to the top edge
+        would otherwise sit on "Elevation [m a.s.l.]". The baseline is
+        clamped into the plot so the topmost manhole keeps its caption
+        instead of losing it above the edge.
         """
         if not candidates:
             return
@@ -569,6 +601,7 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
         painter.setFont(self._missingDataFont())
         painter.setPen(QPen(color))
         metrics = QFontMetrics(painter.font())
+        reserved = self._axisCaptionRects(plot_area, metrics)
         last_right = None
         for center_x, cap_y, text in sorted(candidates, key=lambda c: c[0]):
             width = metrics.horizontalAdvance(text)
@@ -580,6 +613,11 @@ class ManholeDashPlotItem(QgsPlotCanvasItem):
                 if left < plot_area.left() or left + width > plot_area.right():
                     continue
                 baseline = max(baseline, plot_area.top() + metrics.ascent() + 2.0)
+            label_rect = QRectF(
+                left, baseline - metrics.ascent(), width, metrics.height()
+            )
+            if any(label_rect.intersects(r) for r in reserved):
+                continue
             painter.drawText(QPointF(left, baseline), text)
             last_right = left + width
 
