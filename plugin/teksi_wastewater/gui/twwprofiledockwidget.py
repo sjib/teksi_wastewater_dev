@@ -44,10 +44,15 @@ DOCK_WIDGET_UI = get_ui_class("twwdockwidget.ui")
 class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
     # Signal emitted when the widget is closed
     closed = pyqtSignal()
+    # Emitted after Clear Canvas so the plugin can reset the profile map tool
+    # too (its retained path would otherwise resurrect on the next map click).
+    canvasCleared = pyqtSignal()
     canvas = None
     addDockWidget = None
-    # Lookup table for vertical exaggeration values
-    veLUT = {1: 1, 2: 2, 3: 3, 4: 5, 5: 10, 6: 20, 7: 30, 8: 50, 9: 100, 10: 500}
+    # Lookup table for vertical exaggeration values. Step 0 (0.5x) exists for
+    # paths whose relief is too tall to fit at 1x (alpine networks): the fit
+    # snap needs a sub-1 step or the first view of such a path is clipped.
+    veLUT = {0: 0.5, 1: 1, 2: 2, 3: 3, 4: 5, 5: 10, 6: 20, 7: 30, 8: 50, 9: 100, 10: 500}
 
     def __init__(self, parent, canvas, add_dock_widget):
         QDockWidget.__init__(self, parent)
@@ -80,6 +85,7 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         self.clearCanvasButton.clicked.connect(self.onClearCanvasClicked)
         self.printButton.clicked.connect(self.onPrintButtonClicked)
         self.exportImageButton.clicked.connect(self.onExportImageButtonClicked)
+        self.performCalculationButton.clicked.connect(self.onPerformCalculationClicked)
 
         self.mSliderVerticalExaggeration.valueChanged.connect(self.onVerticalExaggerationChanged)
 
@@ -144,6 +150,7 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         self.nodes = None
         self.edges = None
         self.selectCurrentPathAction.setEnabled(False)
+        self.performCalculationButton.setEnabled(False)
 
         # Deselect features on all related map layers
         for layer_name in [
@@ -156,9 +163,31 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
             if layer:
                 layer.removeSelection()
 
+        self.canvasCleared.emit()
+
+    @pyqtSlot()
+    def onPerformCalculationClicked(self):
+        """
+        Redraw the profile of the stored upstream/downstream trace.
+
+        Reopening the dock restores the last trace WITHOUT rendering it (see
+        setTree(render=False)); this button is the explicit way to draw it.
+        """
+        if getattr(self, "edges", None) is None:
+            return
+        if self.plotWidget and hasattr(self.plotWidget, "setProfileFromTree"):
+            self.plotWidget.setProfileFromTree(self.edges)
+
+    def _hasProfile(self):
+        """True when the plot widget currently holds a profile curve."""
+        if not self.plotWidget:
+            return False
+        has_profile = getattr(self.plotWidget, "hasProfile", None)
+        return bool(has_profile()) if callable(has_profile) else True
+
     @pyqtSlot()
     def onPrintButtonClicked(self):
-        if not self.plotWidget:
+        if not self._hasProfile():
             QMessageBox.information(
                 self,
                 self.tr("Print function not available"),
@@ -170,7 +199,7 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
 
     @pyqtSlot()
     def onExportImageButtonClicked(self):
-        if not self.plotWidget:
+        if not self._hasProfile():
             QMessageBox.information(
                 self,
                 self.tr("Export function not available"),
@@ -301,6 +330,7 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         self.nodes = nodes
         self.edges = edges
         self.selectCurrentPathAction.setEnabled(self.nodes is not None)
+        self.performCalculationButton.setEnabled(self.nodes is not None)
 
         # Update profile widget if it supports setProfileFromTree.
         # render=False is used when merely restoring state on dock (re)open, so

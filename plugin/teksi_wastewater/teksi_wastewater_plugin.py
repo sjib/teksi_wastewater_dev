@@ -585,6 +585,7 @@ class TeksiWastewaterPlugin:
                 self.iface.addDockWidget,
             )
             self.profile_dock.closed.connect(self.onDockClosed)
+            self.profile_dock.canvasCleared.connect(self.onDockCanvasCleared)
             self.profile_dock.showIt()
 
             self.plotWidget = TwwElevationProfileWidget(self.profile_dock)
@@ -593,6 +594,16 @@ class TeksiWastewaterPlugin:
             # do NOT redraw it: reopening the dock should start with an empty
             # canvas, not silently re-render the previous selection.
             self.profile_dock.setTree(self.nodes, self.edges, render=False)
+
+    def onDockCanvasCleared(self):
+        """
+        Clear Canvas was clicked in the dock: reset the profile map tool too.
+        Without this the tool keeps its path and segment history, and the
+        "cleared" profile resurrects in full on the next map click.
+        """
+        tool = getattr(self, "profile_tool", None)
+        if tool is not None and hasattr(tool, "clearAll"):
+            tool.clearAll()
 
     def onDockClosed(self):  # used when Dock dialog is closed
         """
@@ -635,6 +646,14 @@ class TeksiWastewaterPlugin:
         self.logger.debug(
             f"onProfileChanged: Received new profile with {len(profile.getElements())} elements"
         )
+
+        # An empty profile is a deliberate clear (right-click, new path start,
+        # undo of the last segment): clear the plot too, or the canvas keeps
+        # showing a path the tool no longer holds.
+        if not profile.getElements():
+            if hasattr(self.plotWidget, "clearProfile"):
+                self.plotWidget.clearProfile()
+            return
 
         # Get geometry directly from profile_tool's pathPolyline
         # This is already in the correct order (built in appendProfile)

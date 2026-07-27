@@ -282,6 +282,11 @@ class TwwProfileMapTool(TwwMapTool):
         self.profile_reach_ids = set()
         self.profile_node_points = []
 
+        # Marker for the node the next click continues the path from. Without
+        # it, a failed "No path found" click leaves the user blind to where the
+        # selection is still anchored.
+        self._anchor_marker = None
+
         self.saveTool = None
 
     def setActive(self):
@@ -303,6 +308,44 @@ class TwwProfileMapTool(TwwMapTool):
         self.pathPolyline = []
         self.profile_reach_ids = set()
         self.profile_node_points = []
+        self._setAnchorMarker(None)
+
+    def clearAll(self):
+        """
+        Reset the whole path selection AND tell listeners.
+
+        The profileChanged emit is the point: every tool-side reset must reach
+        the elevation canvas too, otherwise the dock keeps drawing a profile
+        this tool no longer holds (and the next click appends to a path the
+        user believes is gone).
+        """
+        self.selectedPathPoints = []
+        self.pathPolyline = []
+        self.profile_reach_ids = set()
+        self.profile_node_points = []
+        self.segmentOffset = 0
+        self._segment_history = []
+        self.rubberBand.reset()
+        self.rbHelperLine.reset()
+        self._setAnchorMarker(None)
+        self.profile.reset()
+        self.profileChanged.emit(self.profile)
+
+    def _setAnchorMarker(self, point):
+        """Show, move or (with None) remove the path-anchor marker."""
+        if point is None:
+            if self._anchor_marker is not None:
+                self.canvas.scene().removeItem(self._anchor_marker)
+                self._anchor_marker = None
+            return
+        if self._anchor_marker is None:
+            marker = QgsVertexMarker(self.canvas)
+            marker.setColor(QColor("#FF9500"))
+            marker.setIconSize(12)
+            marker.setIconType(QgsVertexMarker.ICON_CIRCLE)
+            marker.setPenWidth(3)
+            self._anchor_marker = marker
+        self._anchor_marker.setCenter(point)
 
     def findPath(self, start_point, end_point):
         """
@@ -579,6 +622,9 @@ class TwwProfileMapTool(TwwMapTool):
         # Revert selectedPathPoints by one (Option A: keep previous endpoint)
         if len(self.selectedPathPoints) > 1:
             self.selectedPathPoints.pop()
+        self._setAnchorMarker(
+            self.selectedPathPoints[-1][1] if self.selectedPathPoints else None
+        )
 
         # Rebuild profile from remaining history
         self.profile.reset()
@@ -617,16 +663,12 @@ class TwwProfileMapTool(TwwMapTool):
         if self.selectedPathPoints:
             self.selectedPathPoints = []
             self.rbHelperLine.reset()
+            self._setAnchorMarker(None)
         else:
-            # No ongoing selection, clear everything (second right-click)
-            self.pathPolyline = []
-            self.profile_reach_ids = set()
-            self.profile_node_points = []
-            self.rubberBand.reset()  # Clear the path visualization
-            self.rbHelperLine.reset()
-            self.profile.reset()
-            self.segmentOffset = 0
-            self._segment_history = []
+            # No ongoing selection, clear everything (second right-click).
+            # clearAll also emits profileChanged so the elevation canvas is
+            # cleared together with the map rubber band.
+            self.clearAll()
 
     def leftClicked(self, event):
         """
@@ -641,19 +683,28 @@ class TwwProfileMapTool(TwwMapTool):
                 pf = self.findPath(self.selectedPathPoints[-1][0], match.featureId())
                 if pf:
                     self.selectedPathPoints.append((match.featureId(), QgsPointXY(match.point())))
+                    self._setAnchorMarker(self.selectedPathPoints[-1][1])
                 else:
-                    msg = self.msgBar.createMessage("No path found")
-                    self.msgBar.pushWidget(msg, Qgis.Info)
+                    # Timed message: an untimed one per failed click piles up
+                    # as unread. The selection stays anchored (retrying another
+                    # endpoint is legitimate), so say where and how to escape.
+                    self.msgBar.pushMessage(
+                        "TWW",
+                        self.tr(
+                            "No path found from the marked node "
+                            "(profiles follow the flow direction). "
+                            "Right-click to cancel the selection."
+                        ),
+                        Qgis.Info,
+                        5,
+                    )
             else:
-                # Starting a new path - clear old accumulated data
-                self.pathPolyline = []
-                self.profile_reach_ids = set()
-                self.profile_node_points = []
-                self.rubberBand.reset()
-                self.profile.reset()
-                self.segmentOffset = 0
-                self._segment_history = []
+                # Starting a new path: clear old accumulated data everywhere,
+                # including the elevation canvas (clearAll emits profileChanged
+                # — the stale profile must not outlive the path it came from).
+                self.clearAll()
                 self.selectedPathPoints.append((match.featureId(), QgsPointXY(match.point())))
+                self._setAnchorMarker(self.selectedPathPoints[-1][1])
 
 
 class TwwTreeMapTool(TwwMapTool):

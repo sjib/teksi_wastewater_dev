@@ -313,6 +313,10 @@ class TwwElevationProfileWidget(QWidget):
         """Clear hover tooltip and map highlight (e.g. when dock closes)."""
         self._hover_manager.clearState()
 
+    def hasProfile(self):
+        """True when a profile curve is loaded (drives dock button guards)."""
+        return self._profile_curve_geom is not None
+
     def setProfileCurve(self, geometry, reach_ids=None, node_points=None):
         """
         Set the profile curve (path) for the elevation profile.
