@@ -178,11 +178,11 @@ class ProfileHoverManager:
         """Handle hover using raw canvas pixel coordinates."""
         if not hasattr(self._canvas, "canvasPointToPlotPoint"):
             return
-        if hasattr(self._canvas, "snapToPlot"):
-            try:
-                self._canvas.snapToPlot(pos)
-            except Exception:
-                pass
+        # Deliberately NOT calling canvas.snapToPlot() here. Its result is of no
+        # use to us — the hit-testing below is our own — but its side effect is
+        # QGIS's snapped cross-hairs, whose two 6-decimal readouts cannot be
+        # restyled or rounded from Python (PyQGIS exposes no cross-hair API at
+        # all). The hover tooltip already reports the elevation at the cursor.
 
         profile_point = self._canvas.canvasPointToPlotPoint(QPointF(pos))
         if self._isEmptyProfilePoint(profile_point):

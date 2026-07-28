@@ -23,7 +23,7 @@
 # ---------------------------------------------------------------------
 
 
-from qgis.core import QgsFeatureRequest, QgsProject
+from qgis.core import QgsApplication, QgsFeatureRequest, QgsProject
 from qgis.PyQt.QtCore import Qt, pyqtSignal, pyqtSlot
 from qgis.PyQt.QtWidgets import (
     QAction,
@@ -65,6 +65,9 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         self.configureSelectionAction.triggered.connect(self.onConfigureSelectAction)
         self.selectButton.addAction(self.configureSelectionAction)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # Theme icon so the button matches the native elevation-profile dock
+        # (and follows light/dark theme); the .ui cannot reference QGIS themes.
+        self.zoomFullButton.setIcon(QgsApplication.getThemeIcon("mActionZoomFullExtent.svg"))
         self.canvas = canvas
         self.addDockWidget = add_dock_widget
 
@@ -86,6 +89,7 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
         self.printButton.clicked.connect(self.onPrintButtonClicked)
         self.exportImageButton.clicked.connect(self.onExportImageButtonClicked)
         self.performCalculationButton.clicked.connect(self.onPerformCalculationClicked)
+        self.zoomFullButton.clicked.connect(self.onZoomFullClicked)
 
         self.mSliderVerticalExaggeration.valueChanged.connect(self.onVerticalExaggerationChanged)
 
@@ -184,6 +188,19 @@ class TwwProfileDockWidget(QDockWidget, DOCK_WIDGET_UI):
             return False
         has_profile = getattr(self.plotWidget, "hasProfile", None)
         return bool(has_profile()) if callable(has_profile) else True
+
+    @pyqtSlot()
+    def onZoomFullClicked(self):
+        """
+        Reset the view to the whole current path.
+
+        Silent no-op without a profile: unlike Print/Export there is nothing
+        the user might believe was produced, so no dialog is warranted.
+        """
+        if not self._hasProfile():
+            return
+        if self.plotWidget and hasattr(self.plotWidget, "zoomFullProfile"):
+            self.plotWidget.zoomFullProfile()
 
     @pyqtSlot()
     def onPrintButtonClicked(self):

@@ -68,6 +68,18 @@ class TwwElevationProfileWidget(QWidget):
         self.canvas = TwwElevationProfileCanvas(self)
         layout.addWidget(self.canvas)
 
+        # Left-drag pan. Middle-drag pan and wheel zoom are canvas built-ins,
+        # but without a plot tool a left drag is a dead no-op (trackpads have
+        # no middle button). Keep the reference: setTool does not own the tool.
+        self._pan_tool = None
+        try:
+            from qgis.gui import QgsPlotToolPan
+
+            self._pan_tool = QgsPlotToolPan(self.canvas)
+            self.canvas.setTool(self._pan_tool)
+        except Exception:
+            self._pan_tool = None
+
         # Misc state
         self.verticalExaggeration = 1.0
         self._data_sources_setup = False
@@ -132,6 +144,17 @@ class TwwElevationProfileWidget(QWidget):
         """
         self.verticalExaggeration = float(val)
         self._ve_timer.start()
+
+    def zoomFullProfile(self):
+        """
+        Reset the view to the whole current path, exactly as when it was first
+        selected: padded zoom-full plus the fit-exaggeration report, so the
+        dock slider re-snaps too. Called by the dock's Zoom Full button after
+        wheel-zooming/panning has moved the view away.
+        """
+        if self._profile_curve_geom is None:
+            return
+        self._applyPaddedZoomFull()
 
     def resizeEvent(self, event):
         """
