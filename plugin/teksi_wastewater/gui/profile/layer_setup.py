@@ -398,6 +398,7 @@ class ProfileLayerSetup:
                     "co_material": entry.get("co_material"),
                     "co_shape": entry.get("co_shape"),
                     "co_brand": entry.get("co_brand"),
+                    "year_of_construction": entry.get("year_of_construction"),
                     "ss_function": entry.get("ss_function"),
                     "width": manhole_dash_width(dim1_mm, default_px_width),
                 }
@@ -765,6 +766,9 @@ class ProfileLayerSetup:
                     "co_material": attrs.get("co_material"),
                     "co_shape": attrs.get("co_shape"),
                     "co_brand": attrs.get("co_brand"),
+                    # Manhole tooltip only. Cover is a structure part and has no
+                    # year; 1800 is the VSA-DSS sentinel for "unknown".
+                    "year_of_construction": attrs.get("year_of_construction"),
                     # Special-structure function (value-list code) for the tooltip.
                     "ss_function": attrs.get("ss_function"),
                 }

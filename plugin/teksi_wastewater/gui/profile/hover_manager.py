@@ -70,6 +70,8 @@ class ProfileHoverManager:
     REACH_SLOPE_PER_MILL = "_slope_per_mill"
     REACH_RP_FROM_LEVEL = "rp_from_level"
     REACH_RP_TO_LEVEL = "rp_to_level"
+    # Channel is a wastewater_structure; its Baujahr is prefixed on the reach view.
+    REACH_YEAR_OF_CONSTRUCTION = "ws_year_of_construction"
 
     # Canonical main-cover fields on vw_tww_wastewater_structure (co_* from main_co).
     COVER_OBJ_ID = "co_obj_id"
@@ -93,6 +95,11 @@ class ProfileHoverManager:
     MANHOLE_ENTRY_LEVELS = "entry_levels"
     MANHOLE_EXIT_LEVELS = "exit_levels"
     MANHOLE_DIMENSION1 = "ma_dimension1"
+    # wastewater_structure.year_of_construction. Cover is a structure part and
+    # has no year column, so the cover tooltip does not show one.
+    YEAR_OF_CONSTRUCTION = "year_of_construction"
+    # VSA-DSS stores an unknown commissioning year as 1800.
+    UNKNOWN_CONSTRUCTION_YEAR = 1800
 
     # Canonical vw_change_points fields for the change-point tooltip.
     CHANGE_POINT_OBJ_ID = "obj_id"
@@ -392,6 +399,7 @@ class ProfileHoverManager:
                     "entry_levels": dash.get("entry_levels"),
                     "exit_levels": dash.get("exit_levels"),
                     "ma_dimension1": dash.get("dim1_mm"),
+                    "year_of_construction": dash.get("year_of_construction"),
                     "ss_function": dash.get("ss_function"),
                     "_is_manhole_dash": True,
                 },
@@ -701,6 +709,8 @@ class ProfileHoverManager:
                 material_text = resolve_value_list(self.REACH_MATERIAL_VL, material)
                 lines.append(f"Material: {material_text or material}")
 
+            self._appendConstructionYearLine(lines, attrs.get(self.REACH_YEAR_OF_CONSTRUCTION))
+
             clear_height_mm = _to_float(attrs.get(self.REACH_CLEAR_HEIGHT))
             if clear_height_mm is None:
                 lines.append(f"Clear height: {self.MISSING_DATA_HTML}")
@@ -808,6 +818,8 @@ class ProfileHoverManager:
                     lines.append(f"Width: {self.MISSING_DATA_HTML}")
                 else:
                     lines.append(f"Width: {width_mm:.0f} mm")
+
+                self._appendConstructionYearLine(lines, attrs.get(self.YEAR_OF_CONSTRUCTION))
             else:
                 lines.append(f"Node: {obj_id}" if obj_id else "Node")
                 if ws_type:
@@ -1082,6 +1094,22 @@ class ProfileHoverManager:
         if level == 0:
             return None
         return level
+
+    def _appendConstructionYearLine(self, lines, value):
+        """
+        Append 'Year of construction'.
+
+        NULL and the VSA-DSS unknown sentinel 1800 both read as missing data.
+        """
+        year = _to_float(value)
+        if year is None or not math.isfinite(year):
+            lines.append(f"Year of construction: {self.MISSING_DATA_HTML}")
+            return
+        year = int(year)
+        if year <= 0 or year == self.UNKNOWN_CONSTRUCTION_YEAR:
+            lines.append(f"Year of construction: {self.MISSING_DATA_HTML}")
+            return
+        lines.append(f"Year of construction: {year}")
 
     def _appendManholeLabelLine(self, lines, title, label_value):
         text = self._formatLevelLabel(label_value)
