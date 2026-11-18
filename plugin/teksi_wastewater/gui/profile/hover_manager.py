@@ -70,6 +70,8 @@ class ProfileHoverManager:
     REACH_SLOPE_PER_MILL = "_slope_per_mill"
     REACH_RP_FROM_LEVEL = "rp_from_level"
     REACH_RP_TO_LEVEL = "rp_to_level"
+    # Channel is a wastewater_structure; its Baujahr is prefixed on the reach view.
+    REACH_YEAR_OF_CONSTRUCTION = "ws_year_of_construction"
 
     # Canonical main-cover fields on vw_tww_wastewater_structure (co_* from main_co).
     COVER_OBJ_ID = "co_obj_id"
@@ -85,9 +87,19 @@ class ProfileHoverManager:
     MANHOLE_BOTTOM_LEVEL = "wn_bottom_level"
     MANHOLE_COVER_LABEL = "_cover_label"
     MANHOLE_BOTTOM_LABEL = "_bottom_label"
-    MANHOLE_INPUT_LABEL = "_input_label"
-    MANHOLE_OUTPUT_LABEL = "_output_label"
+    # '\nI=..\nO=..' (I1/I2/.. when several). Datamodel 2026.0.1 merged the
+    # former _input_label / _output_label into this single column.
+    MANHOLE_REACH_POINT_LABEL = "_reach_point_label"
+    # Not view fields: reach-point levels of the selected reaches entering /
+    # leaving the structure, collected by ProfileLayerSetup.buildManholeDashes.
+    MANHOLE_ENTRY_LEVELS = "entry_levels"
+    MANHOLE_EXIT_LEVELS = "exit_levels"
     MANHOLE_DIMENSION1 = "ma_dimension1"
+    # wastewater_structure.year_of_construction. Cover is a structure part and
+    # has no year column, so the cover tooltip does not show one.
+    YEAR_OF_CONSTRUCTION = "year_of_construction"
+    # VSA-DSS stores an unknown commissioning year as 1800.
+    UNKNOWN_CONSTRUCTION_YEAR = 1800
 
     # Canonical vw_change_points fields for the change-point tooltip.
     CHANGE_POINT_OBJ_ID = "obj_id"
@@ -383,9 +395,11 @@ class ProfileHoverManager:
                     "bottom_level_missing": dash.get("bottom_level_missing", False),
                     "_cover_label": dash.get("_cover_label"),
                     "_bottom_label": dash.get("_bottom_label"),
-                    "_input_label": dash.get("_input_label"),
-                    "_output_label": dash.get("_output_label"),
+                    "_reach_point_label": dash.get("_reach_point_label"),
+                    "entry_levels": dash.get("entry_levels"),
+                    "exit_levels": dash.get("exit_levels"),
                     "ma_dimension1": dash.get("dim1_mm"),
+                    "year_of_construction": dash.get("year_of_construction"),
                     "ss_function": dash.get("ss_function"),
                     "_is_manhole_dash": True,
                 },
@@ -502,7 +516,11 @@ class ProfileHoverManager:
             invert_pt = self._canvas.plotPointToCanvasPointSafe(distance, invert_z)
             if invert_pt is None:
                 continue
-            band_px = reach_band_px(band.get("clear_height_mm")) or 2.0
+            clear_height_mm = band.get("clear_height_mm")
+            if hasattr(self._canvas, "reachBandThicknessPx"):
+                band_px = self._canvas.reachBandThicknessPx(clear_height_mm)[0] or 2.0
+            else:
+                band_px = reach_band_px(clear_height_mm) or 2.0
             # The band is drawn from the invert upward (soffit above = smaller y).
             top = invert_pt.y() - band_px - margin
             bottom = invert_pt.y() + margin
@@ -691,6 +709,8 @@ class ProfileHoverManager:
                 material_text = resolve_value_list(self.REACH_MATERIAL_VL, material)
                 lines.append(f"Material: {material_text or material}")
 
+            self._appendConstructionYearLine(lines, attrs.get(self.REACH_YEAR_OF_CONSTRUCTION))
+
             clear_height_mm = _to_float(attrs.get(self.REACH_CLEAR_HEIGHT))
             if clear_height_mm is None:
                 lines.append(f"Clear height: {self.MISSING_DATA_HTML}")
@@ -767,11 +787,22 @@ class ProfileHoverManager:
                 self._appendManholeLabelLine(
                     lines, "Bottom level", attrs.get(self.MANHOLE_BOTTOM_LABEL)
                 )
-                self._appendManholeLabelLine(
-                    lines, "Entry level", attrs.get(self.MANHOLE_INPUT_LABEL)
+                reach_point_label = attrs.get(self.MANHOLE_REACH_POINT_LABEL)
+                self._appendReachPointLevelLine(
+                    lines,
+                    "Entry level",
+                    attrs.get(self.MANHOLE_ENTRY_LEVELS),
+                    reach_point_label,
+                    "I",
+                    "no inflow reach",
                 )
-                self._appendManholeLabelLine(
-                    lines, "Exit level", attrs.get(self.MANHOLE_OUTPUT_LABEL)
+                self._appendReachPointLevelLine(
+                    lines,
+                    "Exit level",
+                    attrs.get(self.MANHOLE_EXIT_LEVELS),
+                    reach_point_label,
+                    "O",
+                    "no outflow reach",
                 )
 
                 cover_level = self._manholeCoverLevelValue(attrs)
@@ -787,6 +818,8 @@ class ProfileHoverManager:
                     lines.append(f"Width: {self.MISSING_DATA_HTML}")
                 else:
                     lines.append(f"Width: {width_mm:.0f} mm")
+
+                self._appendConstructionYearLine(lines, attrs.get(self.YEAR_OF_CONSTRUCTION))
             else:
                 lines.append(f"Node: {obj_id}" if obj_id else "Node")
                 if ws_type:
@@ -817,13 +850,18 @@ class ProfileHoverManager:
                 "Clear-height change: "
                 f"{self._formatYesNo(attrs.get(self.CHANGE_POINT_CLEAR_HEIGHT))}"
             )
+            # vw_change_points.change_in_slope is a ratio (m/m): upstream
+            # slope minus downstream slope, both dz / length_effective.
+            # Reach "Gradient" is already per mille; this value is not.
             slope_change = _to_float(attrs.get(self.CHANGE_POINT_SLOPE))
             if slope_change is None:
                 lines.append("Slope change: No")
-            elif slope_change == 0:
-                lines.append("Slope change: No")
             else:
-                lines.append(f"Slope change: {slope_change:.0f} ‰")
+                permille = slope_change * 1000.0
+                if abs(permille) < 0.05:
+                    lines.append("Slope change: No")
+                else:
+                    lines.append(f"Slope change: {permille:.1f} \u2030")
         else:
             if layer_name:
                 lines.append(layer_name)
@@ -1062,6 +1100,22 @@ class ProfileHoverManager:
             return None
         return level
 
+    def _appendConstructionYearLine(self, lines, value):
+        """
+        Append 'Year of construction'.
+
+        NULL and the VSA-DSS unknown sentinel 1800 both read as missing data.
+        """
+        year = _to_float(value)
+        if year is None or not math.isfinite(year):
+            lines.append(f"Year of construction: {self.MISSING_DATA_HTML}")
+            return
+        year = int(year)
+        if year <= 0 or year == self.UNKNOWN_CONSTRUCTION_YEAR:
+            lines.append(f"Year of construction: {self.MISSING_DATA_HTML}")
+            return
+        lines.append(f"Year of construction: {year}")
+
     def _appendManholeLabelLine(self, lines, title, label_value):
         text = self._formatLevelLabel(label_value)
         if not text:
@@ -1069,20 +1123,69 @@ class ProfileHoverManager:
         else:
             lines.append(f"{title}: {text}")
 
+    def _appendReachPointLevelLine(
+        self, lines, title, path_levels, reach_point_label, label_kind, none_text
+    ):
+        """
+        Append a manhole's Entry / Exit level line.
+
+        The levels of the selected reaches entering / leaving the structure
+        come first: they are the values the profile actually draws, and they
+        exist for every reach. The view's _reach_point_label is only the
+        fallback (a reach attached to a secondary node of the structure, or an
+        inflow that is not on the path) — it is generated solely for channels
+        flagged tww_use_in_labels, so on its own it would report real levels
+        of e.g. secondary-network reaches as missing.
+
+        "No reach on this side" (the first manhole of a path has no inflow) is
+        a different statement from "the level is missing" and is not red.
+
+        :param path_levels: floats (None = reach present, level NULL), or empty.
+        :param label_kind: 'I' (inflows) or 'O' (outflows).
+        """
+        if path_levels:
+            entries = [
+                (str(i + 1), None if level is None else f"{level:.2f}")
+                for i, level in enumerate(path_levels)
+            ]
+        else:
+            # The label function writes '?' for a NULL reach-point level.
+            entries = [
+                (idx or str(i + 1), None if value == "?" else value)
+                for i, (kind, idx, value) in enumerate(
+                    self._parseLevelLabel(reach_point_label)
+                )
+                if kind == label_kind
+            ]
+
+        if not entries:
+            lines.append(f"{title}: \u2013 ({none_text})")
+            return
+
+        texts = [
+            (idx, value if value is not None else self.MISSING_DATA_HTML)
+            for idx, value in entries
+        ]
+        if len(texts) == 1:
+            lines.append(f"{title}: {texts[0][1]}")
+        else:
+            lines.append(f"{title}: " + "; ".join(f"{idx}: {text}" for idx, text in texts))
+
     # ------------------------------------------------------------------
     # Formatting helpers
     # ------------------------------------------------------------------
 
     def _parseLevelLabel(self, label):
         """
-        Parse a DB level label into a list of (index, value) tuples.
+        Parse a DB level label into a list of (kind, index, value) tuples.
 
         The DB stores pre-formatted strings like '\\nC=3401.00' or
-        '\\nI1=2736.50\\nI2=2736.50'. We strip the letter prefix and keep
-        only the numeric value; a trailing digit on the prefix (I1, I2, …)
-        is captured as the index.
+        '\\nI1=2736.50\\nI2=2736.50\\nO=2736.40'. The letter prefix is the
+        kind (C cover, B bottom, I inflow, O outflow); a trailing digit on the
+        prefix (I1, I2, …) is captured as the index.
         """
-        if label is None:
+        # "not label" also catches QGIS NULL, which str() would turn into "NULL".
+        if not label:
             return []
         entries = []
         for raw in str(label).replace("\r", "\n").split("\n"):
@@ -1096,9 +1199,9 @@ class ProfileHoverManager:
                 cut = len(prefix)
                 while cut > 0 and prefix[cut - 1].isdigit():
                     cut -= 1
-                entries.append((prefix[cut:], value))
+                entries.append((prefix[:cut].upper(), prefix[cut:], value))
             else:
-                entries.append(("", token))
+                entries.append(("", "", token))
         return entries
 
     def _formatLevelLabel(self, label):
@@ -1111,9 +1214,9 @@ class ProfileHoverManager:
         if not entries:
             return None
         if len(entries) == 1:
-            return entries[0][1]
+            return entries[0][2]
         parts = []
-        for i, (idx, value) in enumerate(entries):
+        for i, (_kind, idx, value) in enumerate(entries):
             parts.append(f"{idx or (i + 1)}: {value}")
         return "; ".join(parts)
 
