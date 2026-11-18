@@ -850,13 +850,18 @@ class ProfileHoverManager:
                 "Clear-height change: "
                 f"{self._formatYesNo(attrs.get(self.CHANGE_POINT_CLEAR_HEIGHT))}"
             )
+            # vw_change_points.change_in_slope is a ratio (m/m): upstream
+            # slope minus downstream slope, both dz / length_effective.
+            # Reach "Gradient" is already per mille; this value is not.
             slope_change = _to_float(attrs.get(self.CHANGE_POINT_SLOPE))
             if slope_change is None:
                 lines.append("Slope change: No")
-            elif slope_change == 0:
-                lines.append("Slope change: No")
             else:
-                lines.append(f"Slope change: {slope_change:.0f} ‰")
+                permille = slope_change * 1000.0
+                if abs(permille) < 0.05:
+                    lines.append("Slope change: No")
+                else:
+                    lines.append(f"Slope change: {permille:.1f} \u2030")
         else:
             if layer_name:
                 lines.append(layer_name)
